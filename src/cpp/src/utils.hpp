@@ -10,7 +10,6 @@
 #include "openvino/genai/llm_pipeline.hpp"
 #include "openvino/genai/visual_language/pipeline.hpp"
 #include "openvino/runtime/core.hpp"
-
 #include "openvino/genai/generation_handle.hpp"
 #include "visual_language/processor_config.hpp"
 
@@ -78,6 +77,7 @@ void read_anymap_param(const ov::AnyMap& config_map, const std::string& name, T&
 const std::string STREAMER_ARG_NAME = "streamer";
 const std::string CONFIG_ARG_NAME = "generation_config";
 const std::string DRAFT_MODEL_ARG_NAME = "draft_model";
+const std::string EAGLE_MODE = "eagle_mode";
 
 template<typename Config = ov::genai::GenerationConfig>
 Config from_config_json_if_exists(const std::filesystem::path& models_path, const char config_name[] = "generation_config.json") {
@@ -255,6 +255,8 @@ std::pair<ov::AnyMap, std::string> extract_attention_backend(const ov::AnyMap& e
 void save_openvino_model(const std::shared_ptr<ov::Model>& model, const std::string& save_path, bool compress_to_fp16);
 
 ov::Tensor merge_text_and_image_embeddings_llava(const ov::Tensor& input_ids, ov::Tensor& text_embeds, const std::vector<ov::Tensor>& image_embeds, int64_t image_token_id);
+
+size_t get_available_gpu_memory(const std::string& device, size_t num_decoder_layers);
 
 }  // namespace utils
 }  // namespace genai
