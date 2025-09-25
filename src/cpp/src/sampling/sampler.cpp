@@ -496,6 +496,66 @@ void Sampler::GroupBeamSearcher::select_next_tokens(const ov::Tensor& logits,
 Token Sampler::_greedy_sample(const Logits& logits, size_t top_logprobs) const {
     // For greedy sampling we do not expect sorting or shrinking considered tokens
     // so we can operate directly on the data buffer
+    std::cout << "[Debug] _greedy_sample() enter" << std::endl;
+    std::cout << "[Debug] _greedy_sample() top_logprobs param: " << top_logprobs << std::endl;
+    if (logits.is_vector_initialized()) {
+        size_t sz = logits.m_vector.size();
+        std::cout << "[Debug] _greedy_sample() logits mode: vector, size=" << sz << std::endl;
+        size_t head = std::min<size_t>(20, sz);
+        size_t tail = (sz > 40) ? 20 : (sz > head ? sz - head : 0);
+        if (sz <= 40) {
+            std::cout << "[Debug] logits(all) index:log_prob -> ";
+            for (size_t i = 0; i < sz; ++i) {
+                std::cout << logits.m_vector[i].m_index << ':' << logits.m_vector[i].m_log_prob;
+                if (i + 1 < sz) std::cout << ' ';
+            }
+            std::cout << std::endl;
+        } else {
+            std::cout << "[Debug] logits head(" << head << ") index:log_prob -> ";
+            for (size_t i = 0; i < head; ++i) {
+                std::cout << logits.m_vector[i].m_index << ':' << logits.m_vector[i].m_log_prob;
+                if (i + 1 < head) std::cout << ' ';
+            }
+            std::cout << std::endl;
+            if (tail) {
+                std::cout << "[Debug] logits tail(" << tail << ") index:log_prob -> ";
+                for (size_t i = sz - tail; i < sz; ++i) {
+                    std::cout << logits.m_vector[i].m_index << ':' << logits.m_vector[i].m_log_prob;
+                    if (i + 1 < sz) std::cout << ' ';
+                }
+                std::cout << std::endl;
+            }
+        }
+    } else {
+        size_t sz = logits.m_size;
+        std::cout << "[Debug] _greedy_sample() logits mode: raw buffer, size=" << sz << std::endl;
+        size_t head = std::min<size_t>(20, sz);
+        size_t tail = (sz > 40) ? 20 : (sz > head ? sz - head : 0);
+        if (sz <= 40) {
+            std::cout << "[Debug] logits(all) values -> ";
+            for (size_t i = 0; i < sz; ++i) {
+                std::cout << logits.m_data[i];
+                if (i + 1 < sz) std::cout << ' ';
+            }
+            std::cout << std::endl;
+        } else {
+            std::cout << "[Debug] logits head(" << head << ") values -> ";
+            for (size_t i = 0; i < head; ++i) {
+                std::cout << logits.m_data[i];
+                if (i + 1 < head) std::cout << ' ';
+            }
+            std::cout << std::endl;
+            if (tail) {
+                std::cout << "[Debug] logits tail(" << tail << ") values -> ";
+                for (size_t i = sz - tail; i < sz; ++i) {
+                    std::cout << logits.m_data[i];
+                    if (i + 1 < sz) std::cout << ' ';
+                }
+                std::cout << std::endl;
+            }
+        }
+    }
+
     size_t m = std::max(size_t(1), top_logprobs); // ensure m is at least 1
     std::vector<float> top_values(m, -std::numeric_limits<float>::infinity());
     std::vector<size_t> top_indexes(m, 0);
@@ -524,6 +584,17 @@ Token Sampler::_greedy_sample(const Logits& logits, size_t top_logprobs) const {
         }));
         max_value = -log_sum;
     }
+
+    // Debug: print selected and top list
+    std::cout << "[Debug] _greedy_sample() top_logprobs processed m=" << m << std::endl;
+    std::cout << "[Debug] _greedy_sample() top candidates (index:value) -> ";
+    for (size_t i = 0; i < m; ++i) {
+        std::cout << top_indexes[i] << ':' << top_values[i];
+        if (i + 1 < m) std::cout << ' ';
+    }
+    std::cout << std::endl;
+    std::cout << "[Debug] _greedy_sample() selected index=" << max_index << " log_prob=" << max_value << std::endl;
+    std::cout << "[Debug] _greedy_sample() exit" << std::endl;
 
     return Token(max_value, max_index);
 }
@@ -1374,14 +1445,27 @@ void Sampler::TopKSelector::finalize_eagle2_candidates(SamplerOutput& sampler_ou
 }
 
 void Sampler::TopKSelector::select_top_k(const ov::Tensor& logits, SamplerOutput& sampler_output) {
+    std::cout << "[Debug][TopKSelector] select_top_k ENTER" << std::endl;
+    ov::Shape dbg_shape = logits.get_shape();
+    std::cout << "[Debug][TopKSelector] logits shape=";
+    for (size_t i = 0; i < dbg_shape.size(); ++i) {
+        std::cout << (i?",":"[") << dbg_shape[i];
+    }
+    std::cout << "]" << std::endl;
+    std::cout << "[Debug][TopKSelector] current tree layer counter(before)=" << m_tree_layer_counter << std::endl;
+    std::cout << "[Debug][TopKSelector] beams size=" << m_beams.size() << " branching_factor=" << m_parameters.eagle_tree_params.branching_factor
+              << " tree_depth=" << m_parameters.eagle_tree_params.tree_depth << std::endl;
     // parent sequence ID -> number of child sequences
     std::map<uint64_t, uint64_t> parent_2_num_childs_map;
     ov::Shape shape = logits.get_shape();
     OPENVINO_ASSERT(shape.size() == 3);
     size_t batch = shape[0], seq_len = shape[1], vocab_size = shape[2];
+    std::cout << "[Debug][TopKSelector] batch=" << batch << " seq_len=" << seq_len << " vocab_size=" << vocab_size << std::endl;
 
     if (m_tree_layer_counter == 0 && m_beams.empty()) {
+        std::cout << "[Debug][TopKSelector] tree_reset triggered (empty beams & layer_counter==0)" << std::endl;
         tree_reset(m_sequence_group);
+        std::cout << "[Debug][TopKSelector] after tree_reset beams size=" << m_beams.size() << std::endl;
     }
 
     for (Beam& beam : m_beams) {
@@ -1407,16 +1491,40 @@ void Sampler::TopKSelector::select_top_k(const ov::Tensor& logits, SamplerOutput
     std::vector<Beam> child_beams;                                       // beams for next execution in step()
     candidates.reserve(m_parameters.eagle_tree_params.branching_factor * m_beams.size());  // num_beams for each beam
     m_tree_layer_counter++;
+    std::cout << "[Debug][TopKSelector] increment layer counter -> " << m_tree_layer_counter << std::endl;
     for (const Beam& beam : m_beams) {
 #if 1 // optimize branch
         size_t batch_offset = beam.m_global_beam_idx * seq_len * vocab_size;
         size_t sequence_offset = (seq_len - 1) * vocab_size;
         const float* beam_logits = logits.data<const float>() + batch_offset + sequence_offset;
+        std::cout << "[Debug][TopKSelector] Beam parent_seq_id=" << beam.m_sequence->get_id()
+                  << " global_beam_idx=" << beam.m_global_beam_idx
+                  << " batch_offset=" << batch_offset << " sequence_offset(last token)=" << sequence_offset << std::endl;
+        // head/tail print of logits slice
+        if (vocab_size) {
+            size_t head = std::min<size_t>(20, vocab_size);
+            size_t tail = (vocab_size > 40) ? 20 : (vocab_size > head ? vocab_size - head : 0);
+            std::cout << "[Debug][TopKSelector] beam_logits head(" << head << "): ";
+            for (size_t i = 0; i < head; ++i) {
+                std::cout << beam_logits[i];
+                if (i + 1 < head) std::cout << ',';
+            }
+            std::cout << std::endl;
+            if (tail) {
+                std::cout << "[Debug][TopKSelector] beam_logits tail(" << tail << "): ";
+                for (size_t i = vocab_size - tail; i < vocab_size; ++i) {
+                    std::cout << beam_logits[i];
+                    if (i + 1 < vocab_size) std::cout << ',';
+                }
+                std::cout << std::endl;
+            }
+        }
         float max_logit = *std::max_element(beam_logits, beam_logits + vocab_size);
         float log_sum = std::log(std::accumulate(
             beam_logits, beam_logits + vocab_size, 0.0f, [max_logit](float accumulated, float to_add) {
                 return accumulated + std::exp(to_add - max_logit);
         }));
+        std::cout << "[Debug][TopKSelector] max_logit=" << max_logit << " log_sum(exp shifted)=" << log_sum << std::endl;
 
         // sort and find the topK
         using Pair = std::pair<float, size_t>;
@@ -1437,12 +1545,28 @@ void Sampler::TopKSelector::select_top_k(const ov::Tensor& logits, SamplerOutput
             result.push_back(minHeap.top());
             minHeap.pop();
         }
+        std::cout << "[Debug][TopKSelector] collected topK raw logits (ascending by value before reverse) size=" << result.size() << std::endl;
         // calculate topK's log_prob and token_id
         for (auto it = result.rbegin(); it != result.rend(); ++it) {
             Beam new_candidate = beam;
             new_candidate.m_log_prob = it->first - max_logit - log_sum;
             new_candidate.m_score += new_candidate.m_log_prob;
             new_candidate.m_token_id = (it->second + (m_d2t? m_d2t[it->second] : 0));
+            if (m_d2t) {
+                std::cout << "[Debug][TopKSelector] candidate token raw_id=" << it->second
+                          << " mapped_delta=" << m_d2t[it->second]
+                          << " final_token_id=" << new_candidate.m_token_id
+                          << " raw_logit=" << it->first
+                          << " log_prob=" << new_candidate.m_log_prob
+                          << " cumulative_score=" << new_candidate.m_score
+                          << std::endl;
+            } else {
+                std::cout << "[Debug][TopKSelector] candidate token_id=" << new_candidate.m_token_id
+                          << " raw_logit=" << it->first
+                          << " log_prob=" << new_candidate.m_log_prob
+                          << " cumulative_score=" << new_candidate.m_score
+                          << std::endl;
+            }
             m_eagle2_candidate_graph->add_candidate(new_candidate, beam.m_node_id);
             candidates.push_back(new_candidate);
         }
@@ -1479,10 +1603,18 @@ void Sampler::TopKSelector::select_top_k(const ov::Tensor& logits, SamplerOutput
                       candidates.begin() + m_parameters.eagle_tree_params.branching_factor,
                       candidates.end(),
                       greater);  // select top k of cumulative probs
+    std::cout << "[Debug][TopKSelector] candidates size after aggregation=" << candidates.size() << std::endl;
+    std::cout << "[Debug][TopKSelector] tree_layer_counter(after aggregation)=" << m_tree_layer_counter << std::endl;
     // leave the last cycle of beam selection to candidate finalization stage
     if (m_tree_layer_counter < m_parameters.eagle_tree_params.tree_depth + 1) {
+        std::cout << "[Debug][TopKSelector] INTERMEDIATE layer (" << m_tree_layer_counter << "/" << (m_parameters.eagle_tree_params.tree_depth + 1)
+                  << ") selecting next child beams" << std::endl;
         for (size_t cand_idx = 0; cand_idx < m_parameters.eagle_tree_params.branching_factor; ++cand_idx) {
             Beam& candidate = candidates[cand_idx];
+            std::cout << "[Debug][TopKSelector] select child candidate seq_id=" << candidate.m_sequence->get_id()
+                      << " token_id=" << candidate.m_token_id
+                      << " score=" << candidate.m_score
+                      << " log_prob=" << candidate.m_log_prob << std::endl;
 
             parent_2_num_childs_map[candidate.m_sequence->get_id()] += 1;
             child_beams.push_back(candidate);  // select top beams
@@ -1521,15 +1653,20 @@ void Sampler::TopKSelector::select_top_k(const ov::Tensor& logits, SamplerOutput
         // child become parents
         m_beams = child_beams;
     } else { // at this point, we already have the full candidate tree
+        std::cout << "[Debug][TopKSelector] FINALIZATION stage reached (layer=" << m_tree_layer_counter << ")" << std::endl;
         // now we start the finalization of candidates and last cycle of beam selection and sequence forking
         for (auto& iter : m_sequence_group->get_running_sequences()) { // at this point, we should have running sequence num = branching factor
             iter->set_status(SequenceStatus::CACHING);
         }
+        std::cout << "[Debug][TopKSelector] running_sequences size before finalize=" << m_sequence_group->get_running_sequences().size() << std::endl;
         finalize_eagle2_candidates(sampler_output);
         m_tree_layer_counter = 0;  // reset counter
         m_beams.clear();
+        std::cout << "[Debug][TopKSelector] finalize done. Reset layer counter & clear beams." << std::endl;
+        std::cout << "[Debug][TopKSelector] select_top_k EXIT" << std::endl;
         return;
     }
+    std::cout << "[Debug][TopKSelector] select_top_k EXIT (intermediate layer) next m_beams size=" << m_beams.size() << std::endl;
 }
 
 Logits Sampler::_get_logit_vector(ov::Tensor logits, size_t batch_idx, size_t token_idx) {
@@ -1540,6 +1677,33 @@ Logits Sampler::_get_logit_vector(ov::Tensor logits, size_t batch_idx, size_t to
     size_t batch_offset = batch_idx * seq_len * vocab_size;
     size_t sequence_offset = (seq_len - token_idx - 1) * vocab_size;
     float* logits_data = logits.data<float>() + batch_offset + sequence_offset;
+
+    // Debug prints
+    std::cout << "[Debug] _get_logit_vector enter" << std::endl;
+    std::cout << "[Debug] logits shape: [" << batch_size << ", " << seq_len << ", " << vocab_size << "]" << std::endl;
+    std::cout << "[Debug] batch_idx=" << batch_idx << " token_idx=" << token_idx << std::endl;
+    std::cout << "[Debug] batch_offset=" << batch_offset << " sequence_offset=" << sequence_offset << std::endl;
+    std::cout << "[Debug] slice vocab_size=" << vocab_size << std::endl;
+    // Head / tail 20 values of this token slice
+    if (vocab_size > 0) {
+        size_t head = std::min<size_t>(20, vocab_size);
+        size_t tail = (vocab_size > 40) ? 20 : (vocab_size > head ? vocab_size - head : 0);
+        std::cout << "[Debug] logits slice head(" << head << "): ";
+        for (size_t i = 0; i < head; ++i) {
+            std::cout << logits_data[i];
+            if (i + 1 < head) std::cout << ' ';
+        }
+        std::cout << std::endl;
+        if (tail) {
+            std::cout << "[Debug] logits slice tail(" << tail << "): ";
+            for (size_t i = vocab_size - tail; i < vocab_size; ++i) {
+                std::cout << logits_data[i];
+                if (i + 1 < vocab_size) std::cout << ' ';
+            }
+            std::cout << std::endl;
+        }
+    }
+    std::cout << "[Debug] _get_logit_vector exit" << std::endl;
 
     return Logits{logits_data, vocab_size};
 }
@@ -1651,6 +1815,7 @@ SequenceGroupSamplingInfo Sampler::sample_from_sequence_group(SequenceGroup::Ptr
     }
 
     if (sampling_params.is_greedy_decoding() || sampling_params.is_multinomial()) {
+        std::cout<<"sgl debug sample_from_sequence_group 0"<<std::endl;
         std::vector<Sequence::Ptr> running_sequences = sequence_group->get_running_sequences();
         size_t num_running_sequences = sequence_group->num_running_seqs();
         if (sampling_params.is_greedy_decoding() && sequence_group->get_num_tokens_to_validate() == 0) {
@@ -1808,6 +1973,7 @@ SequenceGroupSamplingInfo Sampler::sample_from_sequence_group(SequenceGroup::Ptr
             }
         }
     } else if (sampling_params.is_eagle_tree()) {
+        std::cout<<"sgl debug sample_from_sequence_group 1"<<std::endl;
         TopKSelector* topk_searcher;
         {
             uint64_t request_id = sequence_group->get_request_id();
@@ -1820,6 +1986,7 @@ SequenceGroupSamplingInfo Sampler::sample_from_sequence_group(SequenceGroup::Ptr
         }
         topk_searcher->select_top_k(sequence_group_logits, sg_sampling_info.sampler_output);
     } else if (sampling_params.is_beam_search()) {
+        std::cout<<"sgl debug sample_from_sequence_group 2"<<std::endl;
         uint64_t request_id = sequence_group->get_request_id();
 
         // create beam search info if we are on the first generate
@@ -1843,6 +2010,7 @@ SequenceGroupSamplingInfo Sampler::sample_from_sequence_group(SequenceGroup::Ptr
             beam_searcher->finalize(sg_sampling_info.sampler_output);
         }
     }
+        std::cout<<"sgl debug sample_from_sequence_group 3"<<std::endl;
     // Notify handle after sampling is done. 
     // For non-streaming this is effective only when the generation is finished.
     OPENVINO_ASSERT(num_generated_tokens_to_validate >= assisting_pipeline_info.max_removed_tokens_per_request);
@@ -1853,6 +2021,7 @@ SequenceGroupSamplingInfo Sampler::sample_from_sequence_group(SequenceGroup::Ptr
 SamplerOutput Sampler::sample(const std::vector<SequenceGroup::Ptr> & sequence_groups,
                               ov::Tensor logits,
                               bool is_validation_mode_enabled) {
+    std::cout<<"sgl debug sample 0"<<std::endl;
     const float * logits_data = logits.data<float>();
     ov::Shape logits_shape = logits.get_shape();
     OPENVINO_ASSERT(logits_shape.size() == 3);
@@ -1861,6 +2030,7 @@ SamplerOutput Sampler::sample(const std::vector<SequenceGroup::Ptr> & sequence_g
     SamplerOutput sampler_output;
     std::unordered_map<uint64_t, std::future<SequenceGroupSamplingInfo>> sg_sampling_future_map;
     for (size_t sequence_group_id = 0, currently_processed_tokens = 0; sequence_group_id < sequence_groups.size(); ++sequence_group_id) {
+         std::cout<<"sgl debug sample 1"<<std::endl;
         SequenceGroup::Ptr sequence_group = sequence_groups[sequence_group_id];
         if (!sequence_group->is_scheduled())
             continue;
@@ -1871,13 +2041,16 @@ SamplerOutput Sampler::sample(const std::vector<SequenceGroup::Ptr> & sequence_g
 
         const auto request_id = sequence_group->get_request_id();
         if (!m_logit_processors.count(request_id)) {
+    std::cout<<"sgl debug sample 2"<<std::endl;
             std::shared_ptr<StructuredOutputController> structured_output_controller = nullptr;
             if (m_tokenizer.m_pimpl != nullptr) {
+    std::cout<<"sgl debug sample 3"<<std::endl;
                 structured_output_controller = m_tokenizer.m_pimpl->get_structured_output_controller(vocab_size);
             }
             m_logit_processors.insert({request_id, LogitProcessor(sampling_params, sequence_group->get_prompt_ids(), structured_output_controller)});
         }
         if (!m_stop_strings.count(request_id)) {
+    std::cout<<"sgl debug sample 4"<<std::endl;
             auto processed_stop_string = process_stop_strings(sampling_params.stop_strings, m_tokenizer);
             m_stop_strings.insert({request_id, processed_stop_string});
             sequence_group->set_stream_window_size(processed_stop_string.first);
@@ -1886,11 +2059,14 @@ SamplerOutput Sampler::sample(const std::vector<SequenceGroup::Ptr> & sequence_g
         auto& logit_processor = m_logit_processors.at(request_id);
         const void * sequence_group_logits_data = logits_data + vocab_size * currently_processed_tokens;
         ov::Tensor sequence_group_logits(ov::element::f32, ov::Shape{num_running_sequences, output_seq_len, vocab_size}, (void *)sequence_group_logits_data);
+    std::cout<<"sgl debug sample 5"<<std::endl;
         if (sequence_group->requires_sampling()) {
+    std::cout<<"sgl debug sample 6"<<std::endl;
             // Call sample_from_sequence_group asynchronously
             sg_sampling_future_map[request_id] = m_thread_pool.submit(&Sampler::sample_from_sequence_group, this, sequence_group, sequence_group_logits,
                                                                       logit_processor, stop_strings, is_validation_mode_enabled);
         } else {
+    std::cout<<"sgl debug sample 7"<<std::endl;
             // we are in prompt processing phase when prompt is split into chunks and processed step by step
         }
         // accumulate a number of processed tokens
@@ -1904,6 +2080,7 @@ SamplerOutput Sampler::sample(const std::vector<SequenceGroup::Ptr> & sequence_g
         SequenceGroupSamplingInfo sg_sampling_info;
         const auto request_id = sequence_group->get_request_id();
         if (sg_sampling_future_map.find(request_id) != sg_sampling_future_map.end()) {
+    std::cout<<"sgl debug sample 8"<<std::endl;
             // If there is a future assigned to a sequence group we read it's result (blocking if results not available yet)
             sg_sampling_info = sg_sampling_future_map[request_id].get();
             sampler_output.num_generated_tokens += sg_sampling_info.sampler_output.num_generated_tokens;
@@ -1929,15 +2106,18 @@ SamplerOutput Sampler::sample(const std::vector<SequenceGroup::Ptr> & sequence_g
         sequence_group->finish_iteration();
         // decrease sequence_group context in case of candidates generated by draft_model were not accepted by main_model
         if (assisting_pipeline_info.max_removed_tokens_per_request) {
+    std::cout<<"sgl debug sample 9"<<std::endl;
             auto min_processed_tokens = sequence_group->get_prompt_len() + assisting_pipeline_info.min_generated_len - 1;
             sequence_group->update_processed_tokens_num(min_processed_tokens);
             auto& logit_processor = get_logit_processor(sequence_group->get_request_id());
             logit_processor.update_generated_len(min_processed_tokens);
         }
         if (assisting_pipeline_info.updated_validation_len) {
+    std::cout<<"sgl debug sample 10"<<std::endl;
             sequence_group->set_num_validated_tokens(assisting_pipeline_info.updated_validation_len);
         }
     }
+    std::cout<<"sgl debug sample 11"<<std::endl;
     return sampler_output;
 }
 

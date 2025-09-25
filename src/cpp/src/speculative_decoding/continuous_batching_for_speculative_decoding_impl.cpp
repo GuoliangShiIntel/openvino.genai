@@ -429,20 +429,66 @@ void ContinuousBatchingPipeline::ContinuousBatchingForEagleDecodingImpl::finish_
 
 EagleGeneratedRequests
 ContinuousBatchingPipeline::ContinuousBatchingForEagleDecodingImpl::get_generated_requests() {
+    std::cout << "[DEBUG] EagleDecodingImpl::get_generated_requests() - Starting to collect generated requests" << std::endl;
+    std::cout << "[DEBUG] EagleDecodingImpl::get_generated_requests() - Total requests: " << m_requests.size() << std::endl;
     
     EagleGeneratedRequests result;
     for (const auto& request : m_requests) {
         const auto& request_id = request->get_request_id();
+        std::cout << "[DEBUG] EagleDecodingImpl::get_generated_requests() - Processing request ID: " << request_id << std::endl;
+        
         if (!result.count(request_id)) {
             result.insert({request_id, {{}}});
         }
         auto& generated_request = result[request_id];
-        for (const auto& sequence : request->get_running_sequences()) {
+        
+        auto running_sequences = request->get_running_sequences();
+        std::cout << "[DEBUG] EagleDecodingImpl::get_generated_requests() - Request " << request_id 
+                  << " has " << running_sequences.size() << " running sequences" << std::endl;
+        
+        for (const auto& sequence : running_sequences) {
             const auto& sequence_id = sequence->get_grouped_id();
+            const auto& generated_ids = sequence->get_generated_ids();
+            const auto& generated_log_probs = sequence->get_generated_log_probs();
+            const auto& hidden_state = sequence->get_hidden_state();
+            
+            std::cout << "[DEBUG] EagleDecodingImpl::get_generated_requests() - Sequence " << sequence_id 
+                      << " has " << generated_ids.size() << " generated tokens" << std::endl;
+
+            std::cout << "[DEBUG] generated_ids: [";
+            for (size_t i = 0; i < generated_ids.size(); ++i) {
+                std::cout << generated_ids[i];
+                if (i < generated_ids.size() - 1) std::cout << ", ";
+            }
+            std::cout << "]" << std::endl;
+            
+            // 安全地检查隐藏状态
+            std::cout << "[DEBUG] EagleDecodingImpl::get_generated_requests() - Hidden state shape: [";
+            try {
+                if (hidden_state.get_size() > 0) {
+                    auto shape = hidden_state.get_shape();
+                    for (size_t i = 0; i < shape.size(); ++i) {
+                        std::cout << shape[i];
+                        if (i < shape.size() - 1) std::cout << ", ";
+                    }
+                    std::cout << "], element_type: " << hidden_state.get_element_type();
+                } else {
+                    std::cout << "size=0";
+                }
+            } catch (const std::exception& e) {
+                std::cout << "uninitialized or invalid - " << e.what();
+            } catch (...) {
+                std::cout << "uninitialized or invalid - unknown error";
+            }
+            std::cout << "]" << std::endl;
+            
             OPENVINO_ASSERT(!generated_request.count(sequence_id));
-            generated_request.insert({{sequence_id, { sequence->get_generated_ids(), sequence->get_generated_log_probs(), sequence->get_hidden_state()} }});
+            generated_request.insert({{sequence_id, { generated_ids, generated_log_probs, hidden_state} }});
         }
     }
+    
+    std::cout << "[DEBUG] EagleDecodingImpl::get_generated_requests() - Collected " << result.size() 
+              << " generated requests" << std::endl;
     return result;
 }
 

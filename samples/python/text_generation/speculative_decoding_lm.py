@@ -20,18 +20,28 @@ def main():
 
     # User can run main and draft model on different devices.
     # Please, set device for main model in `openvino_genai.LLMPipeline` constructor and in openvino_genai.draft_model` for draft.
-    main_device = 'CPU'  # GPU or NPU can be used as well
-    draft_device = 'CPU'
+    main_device = 'GPU'  # GPU or NPU can be used as well
+    draft_device = 'GPU'
 
     draft_model = openvino_genai.draft_model(args.draft_model_dir, draft_device)
 
-    pipe = openvino_genai.LLMPipeline(args.model_dir, main_device, draft_model=draft_model)
+    # Configure Eagle3 mode for speculative decoding
+    properties = {
+        "eagle_mode": "EAGLE3"  # Pass as string instead of enum
+    }
+    
+    print(f"Creating LLMPipeline with Eagle3 mode...")
+    print(f"Main device: {main_device}, Draft device: {draft_device}")
+    
+    pipe = openvino_genai.LLMPipeline(args.model_dir, main_device, draft_model=draft_model, **properties)
+    
+    print("LLMPipeline created successfully with Eagle3 configuration.")
     
     config = openvino_genai.GenerationConfig()
-    config.max_new_tokens = 100
+    config.max_new_tokens = 10
     # Speculative decoding generation parameters like `num_assistant_tokens` and `assistant_confidence_threshold` are mutually excluded
     # add parameter to enable speculative decoding to generate `num_assistant_tokens` candidates by draft_model per iteration
-    config.num_assistant_tokens = 5
+    config.num_assistant_tokens = 3
     # add parameter to enable speculative decoding to generate candidates by draft_model while candidate probability is higher than `assistant_confidence_threshold`
     # config.assistant_confidence_threshold = 0.4
 

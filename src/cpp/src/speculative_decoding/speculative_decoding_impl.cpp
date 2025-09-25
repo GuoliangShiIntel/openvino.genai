@@ -370,7 +370,7 @@ std::vector<SequenceGroup::Ptr> ContinuousBatchingPipeline::SpeculativeDecodingI
 void extract_hidden_state_generic(std::shared_ptr<ov::Model>& model,
                                                        const std::string& eagle_version,
                                                        const std::string& model_type,
-                                                       const std::string& custom_node_name = "") {
+                                                       const std::string& custom_node_name) {
     if (eagle_version == "EAGLE2" || model_type == "draft") { // for draft model, we always only need to extract last hidden state
         std::cout << model_type << " model - last hidden state extraction" << std::endl;
         ov::pass::Manager pm;
@@ -840,56 +840,77 @@ bool ContinuousBatchingPipeline::EagleDecodingImpl::has_non_finished_requests() 
 }
 
 void ContinuousBatchingPipeline::EagleDecodingImpl::step() {
+    std::cout << " ******** [DEBUG] EagleDecodingImpl::step() - Starting step execution ******** " << std::endl;
+    
     // this blocks adding new requests during step as it may break coherence between main and draft models
     std::lock_guard<std::mutex> lock{m_draft_generations_mutex};
+    std::cout << "[DEBUG] EagleDecodingImpl::step() - Acquired mutex lock" << std::endl;
+    
     auto& raw_perf_counters = m_perf_metrics.raw_metrics;
     auto& main_raw_perf_counters = m_perf_metrics.main_model_metrics.raw_metrics;
 
     ManualTimer step_timer("speculative_decoding: step()");
     step_timer.start();
+    std::cout << "[DEBUG] EagleDecodingImpl::step() - Started step timer" << std::endl;
 
     m_draft_pipeline->pull_awaiting_requests(true);
     m_main_pipeline->pull_awaiting_requests();
+    std::cout << "[DEBUG] EagleDecodingImpl::step() - Pulled awaiting requests from both pipelines" << std::endl;
 
     // generate candidates by draft model
     ManualTimer draft_timer("speculative_decoding: draft_model: multistep()");
     draft_timer.start();
+    std::cout << "[DEBUG] EagleDecodingImpl::step() - Starting draft model multistep" << std::endl;
     m_draft_pipeline->multistep();
     draft_timer.end();
     m_sd_metrics.draft_duration += draft_timer.get_duration();
     m_pipeline_metrics = m_main_pipeline->get_metrics();
-
+    std::cout << "[DEBUG] EagleDecodingImpl::step() - Draft model multistep completed, duration: " 
+              << draft_timer.get_duration() << "s" << std::endl;
     // to generate num_matches statistic
     std::map<int64_t, UpdateRequestResult> update_sequence_info;
     // put candidates to model KV cache
     auto draft_generated_requests = m_draft_pipeline->get_generated_requests();
+    std::cout << "[DEBUG] EagleDecodingImpl::step() - Got " << draft_generated_requests.size() 
+              << " draft generated requests" << std::endl;
+    
     for (const auto& candidate : m_draft_pipeline->get_generated_requests()) {
         auto update_result = m_main_pipeline->update_main_request(candidate.first, candidate.second);
         update_sequence_info.insert({{candidate.first, update_result}});
     }
+    std::cout << "[DEBUG] EagleDecodingImpl::step() - Updated main pipeline with draft candidates" << std::endl;
 
     ManualTimer main_timer("speculative_decoding: main_model: step()");
     main_timer.start();
+    std::cout << "[DEBUG] EagleDecodingImpl::step() - Starting main model step" << std::endl;
     m_main_pipeline->step();
     main_timer.end();
     m_sd_metrics.main_duration += main_timer.get_duration();
     m_pipeline_metrics = m_main_pipeline->get_metrics();
+    std::cout << "[DEBUG] EagleDecodingImpl::step() - Main model step completed, duration: " 
+              << main_timer.get_duration() << "s" << std::endl;
+    
     // get logits and last hidden layer
     auto main_generated_requests =
         m_main_pipeline->get_generated_requests();  // feature extraction is enabled in main pipeline
+    std::cout << "[DEBUG] EagleDecodingImpl::step() - Got " << main_generated_requests.size() 
+              << " main generated requests" << std::endl;
 
     for (const auto& checked_sequence : main_generated_requests) {
         auto update_result = m_draft_pipeline->update_draft_request(checked_sequence.first, checked_sequence.second);
         update_sequence_info[checked_sequence.first].removed_tokens_cnt = update_result.removed_tokens_cnt;
     }
+    std::cout << "[DEBUG] EagleDecodingImpl::step() - Updated draft pipeline with main results" << std::endl;
 
     // finish draft request if the generation was completed
+    int finished_requests = 0;
     for (const auto& draft_request : draft_generated_requests) {
         auto request_id = draft_request.first;
         if (!main_generated_requests.count(request_id)) {
             m_draft_pipeline->finish_request(request_id);
             // remove draft_generation_handle from queue
             m_draft_generations.erase(request_id);
+            finished_requests++;
         }
         auto updated_seq_info = update_sequence_info[request_id];
         // several prompt phase
@@ -902,12 +923,20 @@ void ContinuousBatchingPipeline::EagleDecodingImpl::step() {
         m_sd_metrics.update_draft_accepted_tokens(
             request_id,
             (updated_seq_info.inserted_tokens_cnt - updated_seq_info.removed_tokens_cnt));
+        
+        std::cout << "[DEBUG] EagleDecodingImpl::step() - Request " << request_id 
+                  << " acceptance rate: " << (acceptance_rate * 100) << "%" << std::endl;
     }
+    std::cout << "[DEBUG] EagleDecodingImpl::step() - Finished " << finished_requests << " requests" << std::endl;
 
     step_timer.end();
+    std::cout << "[DEBUG] EagleDecodingImpl::step() - Step completed, total duration: " 
+              << step_timer.get_duration() << "s" << std::endl;
 
     // update perf metrics
     const auto num_generated_tokens = m_main_pipeline->get_processed_tokens_per_iteration();
+    std::cout << "[DEBUG] EagleDecodingImpl::step() - Generated " << num_generated_tokens << " tokens this iteration" << std::endl;
+    
     if (num_generated_tokens > 0) {
         auto infer_duration = step_timer.get_duration_microsec();
 
@@ -922,12 +951,16 @@ void ContinuousBatchingPipeline::EagleDecodingImpl::step() {
         main_raw_perf_counters.m_inference_durations[0] = MicroSeconds(m_main_pipeline_metrics.inference_duration);
         main_raw_perf_counters.m_batch_sizes.push_back(num_generated_tokens); // or should be processed + generated
         m_sd_metrics.update_generated_len(num_generated_tokens);
+        std::cout << "[DEBUG] EagleDecodingImpl::step() - Updated performance metrics" << std::endl;
     }
 
     if (main_generated_requests.empty() && utils::env_setup_for_print_debug_info()) {
+        std::cout << "[DEBUG] EagleDecodingImpl::step() - No main generated requests, printing metrics" << std::endl;
         m_sd_metrics.print(true);
         m_sd_metrics.clean_up();
     }
+    
+    std::cout << "[DEBUG] EagleDecodingImpl::step() - Step execution completed" << std::endl;
 }
 
 ov::Tensor ContinuousBatchingPipeline::EagleDecodingImpl::update_main_input_ids(const ov::Tensor& original_input_ids) {
@@ -1009,6 +1042,7 @@ std::vector<EncodedGenerationResult> ContinuousBatchingPipeline::EagleDecodingIm
     std::vector<GenerationHandle> main_generations;
     ov::Tensor new_input_ids;
     for (size_t request_id = 0; request_id < input_ids.size(); ++request_id) {
+        std::cout << "[DEBUG] EagleDecodingImpl::generate() - request_id " << request_id << std::endl;
         auto new_input_ids = input_ids[request_id]; //update_main_input_ids(input_ids[request_id]);
         OPENVINO_ASSERT(1 == input_ids[request_id].get_shape().at(0), "Use multiple tensors to pass a batch.");
         auto main_sampling_params = sampling_params[request_id];
@@ -1036,7 +1070,7 @@ std::vector<EncodedGenerationResult> ContinuousBatchingPipeline::EagleDecodingIm
     GenerationHandle& generation = main_generations.at(0);
 
     streamer_ptr->start();
-
+    std::cout << " ========= [DEBUG] while (has_non_finished_requests()) Begin ==========" << std::endl;
     while (has_non_finished_requests()) {
         try {
             step();
@@ -1047,6 +1081,7 @@ std::vector<EncodedGenerationResult> ContinuousBatchingPipeline::EagleDecodingIm
         }
         stream_tokens(streamer_ptr, generation);
     }
+    std::cout << " ========= [DEBUG] while (has_non_finished_requests()) Done ==========" << std::endl;
 
     // waiting for competion of streaming
     streamer_ptr->end();

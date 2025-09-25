@@ -113,6 +113,13 @@ PYBIND11_MODULE(py_openvino_genai, m) {
         .def_readonly("perf_metrics", &EncodedResults::perf_metrics)
         .def_readonly("extended_perf_metrics", &EncodedResults::extended_perf_metrics);
 
+    // Add EagleMode enum binding
+    py::enum_<ov::genai::EagleMode>(m, "EagleMode")
+        .value("OFF", ov::genai::EagleMode::OFF, "Default mode, no eagle optimizations")
+        .value("EAGLE2", ov::genai::EagleMode::EAGLE2, "Enable eagle2 optimizations")
+        .value("EAGLE3", ov::genai::EagleMode::EAGLE3, "Enable eagle3 optimizations")
+        .export_values();
+
     init_lora_adapter(m);
     init_generation_config(m);
     init_tokenizer(m);

@@ -173,4 +173,11 @@ private:
     std::vector<std::shared_ptr<ov::op::v0::Parameter>> m_new_parameters;
     std::vector<Output<Node>> m_hidden_layer_outputs;
 };
+
+// Function to extract hidden states for Eagle models
+void extract_hidden_state_generic(std::shared_ptr<ov::Model>& model,
+                                  const std::string& eagle_version,
+                                  const std::string& model_type,
+                                  const std::string& custom_node_name = "");
+
 }
