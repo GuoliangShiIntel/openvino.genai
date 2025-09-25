@@ -186,6 +186,7 @@ public:
      * @return An ov::Tensor with next-token logit scores for each sequence processed during this `forward` call.
      */
     ov::Tensor forward(const std::vector<SequenceGroup::Ptr> & sequence_groups, const Scheduler::Output& scheduler_output) {
+        std::cout << "[DEBUG] ModelRunner::forward() - Entered" << std::endl;
         m_sequence_hidden_state_mapping.clear();
 
         size_t num_sequence_groups = scheduler_output.m_scheduled_sequence_groups_ids.size();
@@ -474,9 +475,35 @@ public:
 
         if (sequence_group_type == SequenceGroupType::TOKENS) {
             m_request.set_tensor("input_ids", input_ids);
+            std::cout << "[DEBUG] ModelRunner::forward() - input_ids shape: [";
+            auto input_ids_shape = input_ids.get_shape();
+            for (size_t i = 0; i < input_ids_shape.size(); ++i) {
+                std::cout << input_ids_shape[i];
+                if (i < input_ids_shape.size() - 1) std::cout << ", ";
+            }
+            std::cout << "]" << std::endl;
+            // 打印所有 input_ids 的值
+            std::cout << "[DEBUG] ModelRunner::forward() - input_ids values: [";
+            const int64_t* input_ids_values = input_ids.data<int64_t>();
+            size_t total_elements = input_ids.get_size();
+            for (size_t i = 0; i < total_elements; ++i) {
+                std::cout << input_ids_values[i];
+                if (i < total_elements - 1) std::cout << ", ";
+                if ((i + 1) % 20 == 0 && i < total_elements - 1) {
+                    std::cout << std::endl << "                                                   ";
+                }
+            }
+            std::cout << "]" << std::endl;
         }
         else if (sequence_group_type == SequenceGroupType::EMBEDDINGS) {
             m_request.set_tensor("inputs_embeds", inputs_embeds);
+            std::cout << "[DEBUG] ModelRunner::forward() - inputs_embeds shape: [";
+            auto inputs_embeds_shape = inputs_embeds.get_shape();
+            for (size_t i = 0; i < inputs_embeds_shape.size(); ++i) {
+                std::cout << inputs_embeds_shape[i];
+                if (i < inputs_embeds_shape.size() - 1) std::cout << ", ";
+            }
+            std::cout << "]" << std::endl;
             if (have_token_type_ids) {
                 m_request.set_tensor("token_type_ids", token_type_ids);
             }
@@ -484,30 +511,128 @@ public:
         if (hidden_state_input && hidden_state_input.get_size() > 0) {
             if (m_is_hidden_state_import_needed) {
                 try {
-                    m_request.set_tensor("target_hidden_state_input", hidden_state_input);
+                    m_request.set_tensor("hidden_states", hidden_state_input);
                     auto shape = hidden_state_input.get_shape();
-                    shape[-1] = shape [-1]/3;
-                    ov::Tensor fake_tensor = ov::Tensor(hidden_state_input.get_element_type(), shape);
-                    auto fake_data = fake_tensor.data<float>();
-                    std::memset(fake_data, 0, fake_tensor.get_byte_size());
-                    m_request.set_tensor("internal_hidden_state_input", fake_tensor);
+                    if (!shape.empty()) shape.back() = shape.back() / 3;
+                    ov::Tensor fake_tensor(hidden_state_input.get_element_type(), shape);
+                    std::memset(fake_tensor.data<float>(), 0, fake_tensor.get_byte_size());
+                    m_request.set_tensor("internal_hidden_states", fake_tensor);
+                    try {
+                        auto tgt = m_request.get_tensor("hidden_states");
+                        auto inl = m_request.get_tensor("internal_hidden_states");
+                        auto dump_head_tail = [](const char* tag, const ov::Tensor& t){
+                            auto s = t.get_shape();
+                            std::cout << "[DEBUG] " << tag << " shape: [";
+                            for (size_t i = 0; i < s.size(); ++i) { std::cout << s[i]; if (i+1<s.size()) std::cout << ", "; }
+                            std::cout << "]" << std::endl;
+                            if (t.get_element_type() == ov::element::f32) {
+                                const float* data = t.data<const float>();
+                                size_t total = t.get_size();
+                                size_t n = std::min<size_t>(20, total);
+                                std::cout << "[DEBUG] " << tag << " head(" << n << "): ";
+                                for (size_t i=0;i<n;i++){ std::cout<<data[i]; if(i+1<n) std::cout<<", "; }
+                                std::cout << std::endl;
+                                if (total > n) {
+                                    std::cout << "[DEBUG] " << tag << " tail(" << n << "): ";
+                                    for (size_t i=total-n;i<total;i++){ std::cout<<data[i]; if(i+1<total) std::cout<<", "; }
+                                    std::cout << std::endl;
+                                }
+                            }
+                        };
+                        dump_head_tail("hidden_states", tgt);
+                        dump_head_tail("internal_hidden_states", inl);
+                    } catch (const ov::Exception&) {}
                 } catch (const ov::Exception& e) {
                 }
             } else {
                 try {
-                    m_request.set_tensor("internal_hidden_state_input", hidden_state_input);
+                    m_request.set_tensor("internal_hidden_states", hidden_state_input);
                     auto shape = hidden_state_input.get_shape();
-                    shape[-1] = shape [-1] * 3;
-                    ov::Tensor fake_tensor = ov::Tensor(hidden_state_input.get_element_type(), shape);
-                    auto fake_data = fake_tensor.data<float>();
-                    std::memset(fake_data, 0, fake_tensor.get_byte_size());
-                    m_request.set_tensor("target_hidden_state_input", fake_tensor);
+                    if (!shape.empty()) shape.back() = shape.back() * 3;
+                    ov::Tensor fake_tensor(hidden_state_input.get_element_type(), shape);
+                    std::memset(fake_tensor.data<float>(), 0, fake_tensor.get_byte_size());
+                    m_request.set_tensor("hidden_states", fake_tensor);
+                    // 打印 internal_hidden_states 与 hidden_states 仅前后20个值
+                    try {
+                        auto inl = m_request.get_tensor("internal_hidden_states");
+                        auto tgt = m_request.get_tensor("hidden_states");
+                        auto dump_head_tail = [](const char* tag, const ov::Tensor& t){
+                            auto s = t.get_shape();
+                            std::cout << "[DEBUG] " << tag << " shape: [";
+                            for (size_t i = 0; i < s.size(); ++i) { std::cout << s[i]; if (i+1<s.size()) std::cout << ", "; }
+                            std::cout << "]" << std::endl;
+                            if (t.get_element_type() == ov::element::f32) {
+                                const float* data = t.data<const float>();
+                                size_t total = t.get_size();
+                                size_t n = std::min<size_t>(20, total);
+                                std::cout << "[DEBUG] " << tag << " head(" << n << "): ";
+                                for (size_t i=0;i<n;i++){ std::cout<<data[i]; if(i+1<n) std::cout<<", "; }
+                                std::cout << std::endl;
+                                if (total > n) {
+                                    std::cout << "[DEBUG] " << tag << " tail(" << n << "): ";
+                                    for (size_t i=total-n;i<total;i++){ std::cout<<data[i]; if(i+1<total) std::cout<<", "; }
+                                    std::cout << std::endl;
+                                }
+                            }
+                        };
+                        dump_head_tail("internal_hidden_states", inl);
+                        dump_head_tail("hidden_states", tgt);
+                    } catch (const ov::Exception&) {}
                 } catch (const ov::Exception& e) {
                 }
             }
         }
         // typical LLM parameters
         m_request.set_tensor("position_ids", position_ids);
+        
+    // 打印 position_ids 的形状和值
+        std::cout << "[DEBUG] ModelRunner::forward() - position_ids shape: [";
+        auto position_ids_shape = position_ids.get_shape();
+        for (size_t i = 0; i < position_ids_shape.size(); ++i) {
+            std::cout << position_ids_shape[i];
+            if (i < position_ids_shape.size() - 1) std::cout << ", ";
+        }
+        std::cout << "]" << std::endl;
+        
+        // 打印所有 position_ids 的值
+        std::cout << "[DEBUG] ModelRunner::forward() - position_ids values: [";
+        const int64_t* position_ids_values = position_ids.data<int64_t>();
+        size_t total_position_elements = position_ids.get_size();
+        for (size_t i = 0; i < total_position_elements; ++i) {
+            std::cout << position_ids_values[i];
+            if (i < total_position_elements - 1) std::cout << ", ";
+            // 每20个值换行，避免输出过长
+            if ((i + 1) % 20 == 0 && i < total_position_elements - 1) {
+                std::cout << std::endl << "                                                        ";
+            }
+        }
+        std::cout << "]" << std::endl;
+
+        // 尝试打印 attention_mask (如果存在)
+        try {
+            auto attention_mask_tensor = m_request.get_tensor("attention_mask");
+            auto am_shape = attention_mask_tensor.get_shape();
+            std::cout << "[DEBUG] ModelRunner::forward() - attention_mask shape: [";
+            for (size_t i = 0; i < am_shape.size(); ++i) { std::cout << am_shape[i]; if (i+1<am_shape.size()) std::cout << ", "; }
+            std::cout << "]" << std::endl;
+            if (attention_mask_tensor.get_element_type() == ov::element::i64) {
+                const int64_t* data = attention_mask_tensor.data<const int64_t>();
+                size_t total = attention_mask_tensor.get_size();
+                std::cout << "[DEBUG] ModelRunner::forward() - attention_mask values: [";
+                for (size_t i=0;i<total;i++){ std::cout<< data[i]; if(i+1<total) std::cout<<", "; if((i+1)%20==0 && i+1<total) std::cout<<"\n                                                     "; }
+                std::cout << "]" << std::endl;
+            } else if (attention_mask_tensor.get_element_type() == ov::element::i32) {
+                const int32_t* data = attention_mask_tensor.data<const int32_t>();
+                size_t total = attention_mask_tensor.get_size();
+                std::cout << "[DEBUG] ModelRunner::forward() - attention_mask values: [";
+                for (size_t i=0;i<total;i++){ std::cout<< data[i]; if(i+1<total) std::cout<<", "; if((i+1)%20==0 && i+1<total) std::cout<<"\n                                                     "; }
+                std::cout << "]" << std::endl;
+            } else if (attention_mask_tensor) {
+                std::cout << "[DEBUG] ModelRunner::forward() - attention_mask element type not int, skip values" << std::endl;
+            }
+        } catch (const ov::Exception&) {
+            std::cout << "[DEBUG] ModelRunner::forward() - attention_mask not set" << std::endl;
+        }
 
         // PA specific parameters
         m_request.set_tensor("past_lens", past_lens);
@@ -566,7 +691,57 @@ public:
         }
 
         // return logits
-        return m_request.get_tensor("logits");
+        auto logits = m_request.get_tensor("logits");
+        std::cout << "[DEBUG] ModelRunner::forward() - logits shape: [";
+        auto logits_shape = logits.get_shape();
+        for (size_t i = 0; i < logits_shape.size(); ++i) {
+            std::cout << logits_shape[i];
+            if (i < logits_shape.size() - 1) std::cout << ", ";
+        }
+        std::cout << "]" << std::endl;
+        std::cout << "[DEBUG] ModelRunner::forward() - Exiting" << std::endl;
+
+        // 获取并打印 logits 形状与前后 20 个值
+        {
+            auto logits_shape = logits.get_shape();
+            std::cout << "[Debug] draft_model logits shape: [";
+            for (size_t i = 0; i < logits_shape.size(); ++i) {
+                std::cout << logits_shape[i];
+                if (i + 1 < logits_shape.size()) std::cout << ", ";
+            }
+            std::cout << "]" << std::endl;
+            if (logits.get_element_type() == ov::element::f32 && logits_shape.size() == 3) {
+                const float* data_ptr = logits.data<const float>();
+                size_t batch = logits_shape[0];
+                size_t seq_len = logits_shape[1];
+                size_t vocab_size = logits_shape[2];
+
+                // 最后一个 token 的 vocab 切片
+                if (seq_len > 0) {
+                    const float* last_row = data_ptr + (batch - 1) * seq_len * vocab_size + (seq_len - 1) * vocab_size;
+                    size_t vocab_head = std::min<size_t>(200, vocab_size);
+                    size_t vocab_tail = std::min<size_t>(20, (vocab_size > vocab_head) ? vocab_size - vocab_head : 0);
+                    std::cout << "[Debug] draft_model logits last token head(" << vocab_head << "): ";
+                    for (size_t i = 0; i < vocab_head; ++i) {
+                        std::cout << last_row[i];
+                        if (i + 1 < vocab_head) std::cout << ' ';
+                    }
+                    std::cout << std::endl;
+                    if (vocab_tail > 0) {
+                        std::cout << "[Debug] draft_model logits last token tail(" << vocab_tail << "): ";
+                        for (size_t i = vocab_size - vocab_tail; i < vocab_size; ++i) {
+                            std::cout << last_row[i];
+                            if (i + 1 < vocab_size) std::cout << ' ';
+                        }
+                        std::cout << std::endl;
+                    }
+                }
+            } else {
+                std::cout << "[Debug] draft_model logits not f32 or unexpected rank, skip value dump" << std::endl;
+            }
+        }
+
+        return logits;
     }
 
     void append_embeddings(const std::vector<SequenceGroup::Ptr> & sequence_groups, const Scheduler::Output& scheduler_output) {

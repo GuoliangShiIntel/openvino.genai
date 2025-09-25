@@ -340,12 +340,13 @@ static constexpr ov::Property<bool> prompt_lookup{"prompt_lookup"};
 
 /**
 * @brief enable eagle_mode property serves to activate eagle decoding.
-* for eagle2 now
+* for eagle2 and eagle3
 * And create LLMPipeline instance with this config.
 */
 enum class EagleMode {
-    OFF = 0,  // Default mode, no eagle2 optimizations
-    EAGLE2 = 1   // Enable eagle2 optimizations
+    OFF = 0,  // Default mode, no eagle optimizations
+    EAGLE2 = 1,   // Enable eagle2 optimizations
+    EAGLE3 = 2    // Enable eagle3 optimizations
 };
 static constexpr ov::Property<EagleMode> eagle_mode{"eagle_mode"};
 

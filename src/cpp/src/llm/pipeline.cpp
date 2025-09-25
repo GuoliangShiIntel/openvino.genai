@@ -13,6 +13,7 @@
 #include "llm/pipeline_continuous_batching_adapter.hpp"
 #include "speculative_decoding/speculative_decoding_impl.hpp"
 #include "speculative_decoding/speculative_decoding_stateful.hpp"
+#include "speculative_decoding/eagle3_stateful.hpp"
 #include "utils.hpp"
 
 namespace ov {
@@ -92,7 +93,24 @@ static std::unique_ptr<LLMPipelineImplBase> create(
     auto properties_without_draft_model = properties;
     auto draft_model_descr = ov::genai::utils::extract_draft_model_from_config(properties_without_draft_model);
     if (draft_model_descr.model != nullptr) {
+        // Check for Eagle mode and remove it from properties before passing to OpenVINO
+        std::string eagle_mode;
+        auto eagle_mode_it = properties_without_draft_model.find(ov::genai::utils::EAGLE_MODE);
+        if (eagle_mode_it != properties_without_draft_model.end()) {
+            eagle_mode = eagle_mode_it->second.as<std::string>();
+            properties_without_draft_model.erase(eagle_mode_it);  // Remove from properties
+            std::cout << "Found eagle_mode: " << eagle_mode << std::endl;
+        }
+        
         auto main_model_descr = ov::genai::ModelDesc(model, tokenizer, device, properties_without_draft_model, {}, generation_config);
+        
+        if (eagle_mode == "EAGLE3") {
+            std::cout << "Creating StatefulEagle3LLMPipeline" << std::endl;
+            return std::make_unique<StatefulEagle3LLMPipeline>(main_model_descr, draft_model_descr);
+        }
+        // EAGLE2 and other modes would fall through to regular speculative decoding
+        
+        // Default to regular speculative decoding
         return std::make_unique<StatefulSpeculativeLLMPipeline>(main_model_descr, draft_model_descr);
     }
 
@@ -156,7 +174,7 @@ ov::genai::LLMPipeline::LLMPipeline(
 
     auto [properties, attention_backend] = utils::extract_attention_backend(user_properties);
 
-    if (ov::genai::utils::is_npu_requested(device, properties)) {
+    if (true or ov::genai::utils::is_npu_requested(device, properties)) {
         m_pimpl = StatefulPipeline::create(models_path, device, properties);
     } else if (utils::explicitly_requires_paged_attention(user_properties)) {
         // If CB is invoked explicitly, create CB adapter as is and re-throw in case if internal issues
