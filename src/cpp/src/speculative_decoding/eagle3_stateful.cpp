@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <iostream>
 #include <iomanip>
+#include <numeric>
 
 namespace ov::genai {
 template<class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
@@ -26,18 +27,11 @@ bool are_tokenizers_equal(ov::genai::Tokenizer& lhs, ov::genai::Tokenizer& rhs);
 
 } // namespace ov::genai
 
-namespace {
+//==================================================================================================
+// Utility Functions
+//==================================================================================================
 
-/**
- * @brief Utility function to stream generated tokens
- */
-ov::genai::StreamingStatus stream_generated_tokens(std::shared_ptr<ov::genai::StreamerBase> streamer_ptr,
-                                                   const std::vector<int64_t>& tokens) {
-    if (streamer_ptr) {
-        return streamer_ptr->write(tokens);
-    }
-    return ov::genai::StreamingStatus{};
-}
+namespace {
 
 /**
  * @brief Utility to format time duration for logging
@@ -78,6 +72,14 @@ ov::Tensor extract_last_hidden_state(const ov::Tensor& hidden_features) {
     return last_hidden;
 }
 
+/**
+ * @brief Configure device-specific KV cache precision
+ */
+void configure_kv_cache_precision(ov::AnyMap& properties, const std::string& device) {
+    // Set FP16 precision for all devices for memory efficiency
+    properties[ov::hint::kv_cache_precision.name()] = ov::element::f16;
+}
+
 } // anonymous namespace
 
 namespace ov {
@@ -95,23 +97,10 @@ Eagle3InferWrapper::Eagle3InferWrapper(const ov::genai::ModelDesc& model_desc)
     
     log_debug("Initializing Eagle3InferWrapper for device: " + m_device);
     
-    // Prepare compilation properties with device-specific KV cache precision
+    // Configure compilation properties
     ov::AnyMap compilation_properties = m_properties;
-    
-    // Set KV cache precision based on device capabilities
-    if (m_device == "NPU") {
-        // NPU may benefit from FP16 precision for memory efficiency
-        compilation_properties[ov::hint::kv_cache_precision.name()] = ov::element::f16;
-        log_debug("NPU device: Setting KV cache precision to FP16 for memory efficiency");
-    } else if (m_device == "GPU") {
-        // GPU can handle FP16 well and benefits from memory savings
-        compilation_properties[ov::hint::kv_cache_precision.name()] = ov::element::f16;
-        log_debug("GPU device: Setting KV cache precision to FP16 for memory efficiency");
-    } else {
-        // CPU and other devices - use FP16 for consistency
-        compilation_properties[ov::hint::kv_cache_precision.name()] = ov::element::f16;
-        log_debug("Device " + m_device + ": Setting KV cache precision to FP16");
-    }
+    configure_kv_cache_precision(compilation_properties, m_device);
+    log_debug("Device " + m_device + ": Setting KV cache precision to FP16 for memory efficiency");
     
     // Compile model with enhanced properties
     ov::Core core;
@@ -123,8 +112,15 @@ Eagle3InferWrapper::Eagle3InferWrapper(const ov::genai::ModelDesc& model_desc)
     m_raw_perf_metrics.tokenization_durations = {ov::genai::MicroSeconds(0.0f)};
     m_raw_perf_metrics.detokenization_durations = {ov::genai::MicroSeconds(0.0f)};
     
+    // Initialize model configuration
+    initialize_model_config(model_desc.model, compiled_model);
+    
+    log_debug("Eagle3InferWrapper initialization completed");
+}
+
+void Eagle3InferWrapper::initialize_model_config(const std::shared_ptr<ov::Model>& model, const ov::CompiledModel& compiled_model) {
     // Get KV-cache axes positions
-    m_kv_axes_pos = ov::genai::utils::get_kv_axes_pos(model_desc.model);
+    m_kv_axes_pos = ov::genai::utils::get_kv_axes_pos(model);
     
     // Configure device-specific parameters
     if (m_device == "NPU") {
@@ -259,7 +255,7 @@ ov::Tensor Eagle3InferWrapper::infer_target_model(const ov::Tensor& input_ids,
     m_request.set_tensor("position_ids", position_ids);
     
     if (m_device != "NPU") {
-        m_request.get_tensor("beam_idx").set_shape({BATCH_SIZE});
+        m_request.get_tensor("beam_idx").set_shape({eagle3_constants::BATCH_SIZE});
         m_request.get_tensor("beam_idx").data<int32_t>()[0] = 0;
     }
     
@@ -347,7 +343,7 @@ ov::Tensor Eagle3InferWrapper::infer_draft_model(const ov::Tensor& input_ids,
     }
     
     if (m_device != "NPU") {
-        m_request.get_tensor("beam_idx").set_shape({BATCH_SIZE});
+        m_request.get_tensor("beam_idx").set_shape({eagle3_constants::BATCH_SIZE});
         m_request.get_tensor("beam_idx").data<int32_t>()[0] = 0;
     }
     
@@ -598,18 +594,18 @@ void Eagle3InferWrapper::log_model_outputs(const ov::Tensor& logits, const ov::T
                 
                 std::sort(top_logits.begin(), top_logits.end(), std::greater<std::pair<float, int64_t>>());
                 
-                std::cout << "[EAGLE3-WRAPPER] Position " << pos << " - Top 10 logits: ";
-                for (std::size_t i = 0; i < std::min<std::size_t>(10, top_logits.size()); ++i) {
+                std::cout << "[EAGLE3-WRAPPER] Position " << pos << " - Top " << eagle3_constants::TOP_LOGITS_COUNT << " logits: ";
+                for (std::size_t i = 0; i < std::min<std::size_t>(eagle3_constants::TOP_LOGITS_COUNT, top_logits.size()); ++i) {
                     std::cout << "token_" << top_logits[i].second << ":" << std::fixed << std::setprecision(3) << top_logits[i].first;
-                    if (i + 1 < std::min<std::size_t>(10, top_logits.size())) std::cout << ", ";
+                    if (i + 1 < std::min<std::size_t>(eagle3_constants::TOP_LOGITS_COUNT, top_logits.size())) std::cout << ", ";
                 }
                 std::cout << std::endl;
                 
-                // Show first 20 raw logit values for each position
-                std::cout << "[EAGLE3-WRAPPER] Position " << pos << " - First 20 raw logits: ";
-                for (std::size_t i = 0; i < std::min<std::size_t>(20, vocab_size); ++i) {
-                    std::cout << std::fixed << std::setprecision(4) << logits_data[i];
-                    if (i + 1 < std::min<std::size_t>(20, vocab_size)) std::cout << ", ";
+                // Show first raw logit values for each position
+                std::cout << "[EAGLE3-WRAPPER] Position " << pos << " - First " << eagle3_constants::MAX_DEBUG_ELEMENTS << " raw logits: ";
+                for (std::size_t i = 0; i < std::min<std::size_t>(eagle3_constants::MAX_DEBUG_ELEMENTS, vocab_size); ++i) {
+                    std::cout << std::fixed << std::setprecision(eagle3_constants::PRECISION_DIGITS) << logits_data[i];
+                    if (i + 1 < std::min<std::size_t>(eagle3_constants::MAX_DEBUG_ELEMENTS, vocab_size)) std::cout << ", ";
                 }
                 std::cout << std::endl;
             }
@@ -625,12 +621,12 @@ void Eagle3InferWrapper::log_model_outputs(const ov::Tensor& logits, const ov::T
             std::size_t hidden_dim = hidden_shape[2];
             const float* hidden_data = hidden_features.data<const float>() + (seq_len - 1) * hidden_dim;
             
-            std::cout << "[EAGLE3-WRAPPER] Last hidden state (first 10 dims): ";
-            for (std::size_t i = 0; i < std::min<std::size_t>(10, hidden_dim); ++i) {
-                std::cout << std::fixed << std::setprecision(4) << hidden_data[i];
-                if (i + 1 < std::min<std::size_t>(10, hidden_dim)) std::cout << ", ";
+            std::cout << "[EAGLE3-WRAPPER] Last hidden state (first " << eagle3_constants::TOP_LOGITS_COUNT << " dims): ";
+            for (std::size_t i = 0; i < std::min<std::size_t>(eagle3_constants::TOP_LOGITS_COUNT, hidden_dim); ++i) {
+                std::cout << std::fixed << std::setprecision(eagle3_constants::PRECISION_DIGITS) << hidden_data[i];
+                if (i + 1 < std::min<std::size_t>(eagle3_constants::TOP_LOGITS_COUNT, hidden_dim)) std::cout << ", ";
             }
-            if (hidden_dim > 10) std::cout << " ... (+" << (hidden_dim - 10) << " more)";
+            if (hidden_dim > eagle3_constants::TOP_LOGITS_COUNT) std::cout << " ... (+" << (hidden_dim - eagle3_constants::TOP_LOGITS_COUNT) << " more)";
             std::cout << std::endl;
         }
     }
@@ -687,7 +683,7 @@ StatefulEagle3LLMPipeline::StatefulEagle3LLMPipeline(const ov::genai::ModelDesc&
     
     auto main_desc = main_model_desc;
     if (main_desc.device == "NPU") {
-        main_desc.properties["NPUW_LLM_MAX_GENERATION_TOKEN_LEN"] = MAX_CANDIDATES + 1;
+        main_desc.properties["NPUW_LLM_MAX_GENERATION_TOKEN_LEN"] = eagle3_constants::MAX_CANDIDATES + 1;
     }
     
     m_main_model = std::make_unique<Eagle3InferWrapper>(main_desc);
@@ -954,7 +950,7 @@ EncodedResults StatefulEagle3LLMPipeline::generate(const EncodedInputs& inputs,
     return results;
 }
 
-StatefulEagle3LLMPipeline::SpeculativeResult 
+SpeculativeResult 
 StatefulEagle3LLMPipeline::run_speculative_iteration(const ov::Tensor& hidden_window, 
                                                      std::size_t window_size, 
                                                      int64_t eos_token_id) {
@@ -995,7 +991,7 @@ StatefulEagle3LLMPipeline::run_speculative_iteration(const ov::Tensor& hidden_wi
     auto draft_hidden = extract_last_hidden_state(m_draft_model->get_hidden_features());
     
     // Step 2: Additional draft iterations  
-    for (std::size_t i = 0; i < DEFAULT_DRAFT_ITERATIONS; ++i) {
+    for (std::size_t i = 0; i < eagle3_constants::DEFAULT_DRAFT_ITERATIONS; ++i) {
         m_draft_model->build_model_inputs(-1, 1, 
                                          draft_input_ids, draft_attention_mask, draft_position_ids, false);
         
@@ -1022,7 +1018,7 @@ StatefulEagle3LLMPipeline::run_speculative_iteration(const ov::Tensor& hidden_wi
     auto validation_start = std::chrono::steady_clock::now();
     
     std::size_t current_target_len = m_main_model->get_sequence_length();
-    std::size_t validation_window = std::min(DEFAULT_VALIDATION_WINDOW, current_target_len);
+    std::size_t validation_window = std::min(eagle3_constants::DEFAULT_VALIDATION_WINDOW, current_target_len);
     
     if (validation_window == 0) {
         log_debug("Validation window too small, skipping validation");

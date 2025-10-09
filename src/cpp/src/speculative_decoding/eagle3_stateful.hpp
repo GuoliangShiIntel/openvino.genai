@@ -11,9 +11,119 @@
 #include <openvino/genai/speculative_decoding/perf_metrics.hpp>
 #include <chrono>
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace ov {
 namespace genai {
+
+//==================================================================================================
+// Constants and Configuration
+//==================================================================================================
+
+namespace eagle3_constants {
+    static constexpr std::size_t BATCH_SIZE = 1;
+    static constexpr std::size_t DEFAULT_DRAFT_ITERATIONS = 3;
+    static constexpr std::size_t DEFAULT_VALIDATION_WINDOW = 5;
+    static constexpr std::size_t MAX_CANDIDATES = 10;  // For NPU compatibility
+    static constexpr std::size_t MAX_DEBUG_ELEMENTS = 20;
+    static constexpr std::size_t TOP_LOGITS_COUNT = 10;
+    static constexpr int PRECISION_DIGITS = 4;
+}
+
+//==================================================================================================
+// Data Structures
+//==================================================================================================
+
+/**
+ * @brief Performance metrics for inference operations
+ */
+struct InferenceMetrics {
+    uint64_t total_inference_time_us = 0;
+    uint64_t last_inference_time_us = 0;
+    std::size_t total_inferences = 0;
+    std::size_t total_tokens_processed = 0;
+    
+    double get_average_inference_time_us() const {
+        return total_inferences > 0 ? static_cast<double>(total_inference_time_us) / total_inferences : 0.0;
+    }
+    
+    double get_tokens_per_second() const {
+        return total_inference_time_us > 0 ? (total_tokens_processed * 1000000.0) / total_inference_time_us : 0.0;
+    }
+    
+    void reset() {
+        total_inference_time_us = 0;
+        last_inference_time_us = 0;
+        total_inferences = 0;
+        total_tokens_processed = 0;
+    }
+};
+
+/**
+ * @brief Performance summary for Eagle3 speculative decoding
+ */
+struct PerformanceSummary {
+    uint64_t total_generation_time_us = 0;
+    uint64_t draft_inference_time_us = 0;
+    uint64_t main_inference_time_us = 0;
+    uint64_t validation_time_us = 0;
+    
+    std::size_t prompt_tokens = 0;
+    std::size_t generated_tokens = 0;
+    std::size_t draft_iterations = 0;
+    std::size_t validation_rounds = 0;
+    std::size_t accepted_tokens = 0;
+    std::size_t rejected_tokens = 0;
+    
+    double get_acceptance_rate() const {
+        std::size_t total = accepted_tokens + rejected_tokens;
+        return total > 0 ? static_cast<double>(accepted_tokens) / total : 0.0;
+    }
+    
+    double get_speedup() const {
+        return main_inference_time_us > 0 ? 
+            static_cast<double>(generated_tokens * main_inference_time_us) / (draft_inference_time_us + main_inference_time_us) : 1.0;
+    }
+    
+    void reset() {
+        *this = PerformanceSummary{};
+    }
+};
+
+/**
+ * @brief Result structure for speculative iteration
+ */
+struct SpeculativeResult {
+    ov::Tensor next_hidden_window;          // Hidden states for next iteration
+    std::size_t accepted_tokens_count = 0;  // Number of accepted tokens
+    std::size_t next_window_size = 0;       // Size of window for next iteration  
+    int64_t new_token = -1;                 // Newly generated token (-1 if none)
+    bool eos_reached = false;               // Whether EOS was generated
+};
+
+/**
+ * @brief Validation context for token sequence validation
+ */
+struct ValidationContext {
+    std::size_t validation_window = 0;
+    std::size_t accepted_count = 0;
+    int64_t future_token = -1;
+    bool mismatch_found = false;
+    int validation_position = -1;
+    
+    void reset() {
+        validation_window = 0;
+        accepted_count = 0;
+        future_token = -1;
+        mismatch_found = false;
+        validation_position = -1;
+    }
+};
+
+//==================================================================================================
+// Eagle3InferWrapper Class
+//==================================================================================================
 
 /**
  * @brief Wrapper for Eagle3 model inference with performance tracking
@@ -27,8 +137,8 @@ public:
     ~Eagle3InferWrapper() = default;
 
     // Configuration methods
-    std::string device() const { return m_device; }
-    ov::genai::GenerationConfig get_generation_config() const { return m_generation_config; }
+    const std::string& device() const { return m_device; }
+    const ov::genai::GenerationConfig& get_generation_config() const { return m_generation_config; }
     void set_generation_config(ov::genai::GenerationConfig cfg) { m_generation_config = std::move(cfg); }
     void set_verbose(bool verbose) { m_verbose = verbose; }
     bool is_verbose() const { return m_verbose; }
@@ -65,45 +175,23 @@ public:
     std::variant<int64_t, std::vector<int64_t>> sample_tokens(const ov::Tensor& logits, std::size_t count);
 
     // Performance metrics
-    struct InferenceMetrics {
-        uint64_t total_inference_time_us = 0;
-        uint64_t last_inference_time_us = 0;
-        std::size_t total_inferences = 0;
-        std::size_t total_tokens_processed = 0;
-        
-        double get_average_inference_time_us() const {
-            return total_inferences > 0 ? static_cast<double>(total_inference_time_us) / total_inferences : 0.0;
-        }
-        
-        double get_tokens_per_second() const {
-            return total_inference_time_us > 0 ? (total_tokens_processed * 1000000.0) / total_inference_time_us : 0.0;
-        }
-        
-        void reset() {
-            total_inference_time_us = 0;
-            last_inference_time_us = 0;
-            total_inferences = 0;
-            total_tokens_processed = 0;
-        }
-    };
-    
     const InferenceMetrics& get_metrics() const { return m_metrics; }
     ov::genai::RawPerfMetrics& get_raw_perf_metrics() { return m_raw_perf_metrics; }
 
 private:
-    static constexpr std::size_t BATCH_SIZE = 1;
-    
     // Core inference helper
     uint64_t execute_inference(const ov::Tensor& input_ids);
     void update_performance_metrics(uint64_t inference_time_us, std::size_t tokens_count);
+    void initialize_model_config(const std::shared_ptr<ov::Model>& model, const ov::CompiledModel& compiled_model);
     
     // Debug logging functions
     void log_debug(const std::string& message) const;
     void log_tensor_info(const std::string& name, const ov::Tensor& tensor) const;
-    void log_tensor_content(const std::string& name, const ov::Tensor& tensor, std::size_t max_elements = 10) const;
+    void log_tensor_content(const std::string& name, const ov::Tensor& tensor, std::size_t max_elements = eagle3_constants::MAX_DEBUG_ELEMENTS) const;
     void log_model_inputs(const ov::Tensor& input_ids, const ov::Tensor& attention_mask, const ov::Tensor& position_ids) const;
     void log_model_outputs(const ov::Tensor& logits, const ov::Tensor& hidden_features) const;
 
+private:
     // Model and configuration
     std::string m_device;
     ov::AnyMap m_properties;
@@ -132,6 +220,10 @@ private:
     bool m_verbose = true;
 };
 
+//==================================================================================================
+// StatefulEagle3LLMPipeline Class
+//==================================================================================================
+
 /**
  * @brief Stateful Eagle3 LLM Pipeline for speculative decoding
  * 
@@ -156,52 +248,27 @@ public:
     
     // Performance metrics
     ov::genai::SpeculativeDecodingMetrics get_speculative_decoding_metrics() const;
+    const PerformanceSummary& get_performance_summary() const { return m_perf_summary; }
     
     // Debug logging
     void log_generation_step(const std::string& step_name, std::size_t step_number) const;
     void log_sequence_state(const std::string& context) const;
-    
-    struct PerformanceSummary {
-        uint64_t total_generation_time_us = 0;
-        uint64_t draft_inference_time_us = 0;
-        uint64_t main_inference_time_us = 0;
-        uint64_t validation_time_us = 0;
-        
-        std::size_t prompt_tokens = 0;
-        std::size_t generated_tokens = 0;
-        std::size_t draft_iterations = 0;
-        std::size_t validation_rounds = 0;
-        std::size_t accepted_tokens = 0;
-        std::size_t rejected_tokens = 0;
-        
-        double get_acceptance_rate() const {
-            std::size_t total = accepted_tokens + rejected_tokens;
-            return total > 0 ? static_cast<double>(accepted_tokens) / total : 0.0;
-        }
-        
-        double get_speedup() const {
-            return main_inference_time_us > 0 ? 
-                static_cast<double>(generated_tokens * main_inference_time_us) / (draft_inference_time_us + main_inference_time_us) : 1.0;
-        }
-        
-        void reset() {
-            *this = PerformanceSummary{};
-        }
-    };
-    
-    const PerformanceSummary& get_performance_summary() const { return m_perf_summary; }
 
 private:
-    struct SpeculativeResult {
-        ov::Tensor next_hidden_window;          // Hidden states for next iteration
-        std::size_t accepted_tokens_count = 0;  // Number of accepted tokens
-        std::size_t next_window_size = 0;       // Size of window for next iteration  
-        int64_t new_token = -1;                 // Newly generated token (-1 if none)
-        bool eos_reached = false;               // Whether EOS was generated
-    };
-
     // Core Eagle3 algorithm
     SpeculativeResult run_speculative_iteration(const ov::Tensor& hidden_window, std::size_t window_size, int64_t eos_token_id);
+    
+    // Draft generation helpers
+    void generate_draft_candidates(const ov::Tensor& hidden_window, std::size_t window_size, 
+                                  std::vector<int64_t>& draft_candidates,
+                                  std::size_t& pre_draft_main_len, std::size_t& pre_draft_draft_len);
+    
+    // Validation helpers
+    ValidationContext validate_draft_tokens(const std::vector<int64_t>& draft_candidates, 
+                                           std::size_t current_target_len);
+    void apply_validation_results(const ValidationContext& validation_ctx, 
+                                 const std::vector<int64_t>& draft_candidates,
+                                 std::size_t pre_draft_main_len, std::size_t pre_draft_draft_len);
     
     // Draft-to-target token mapping
     int64_t map_draft_token(int64_t draft_token) const;
@@ -216,14 +283,10 @@ private:
     ov::Tensor slice_hidden_features(const ov::Tensor& hidden_features, std::size_t start_pos, std::size_t length) const;
     ov::Tensor combine_hidden_windows(const ov::Tensor& confirmed_hidden, const ov::Tensor& new_hidden) const;
 
+private:
     // Model wrappers
     std::unique_ptr<Eagle3InferWrapper> m_draft_model;
     std::unique_ptr<Eagle3InferWrapper> m_main_model;
-    
-    // Algorithm parameters
-    static constexpr std::size_t DEFAULT_DRAFT_ITERATIONS = 3;
-    static constexpr std::size_t DEFAULT_VALIDATION_WINDOW = 5;
-    static constexpr std::size_t MAX_CANDIDATES = 10;  // For NPU compatibility
     
     // Draft-to-target token mapping
     ov::Tensor m_draft_target_mapping;
@@ -236,7 +299,6 @@ private:
     // Chat state
     bool m_is_chat_active = false;
     ChatHistory m_chat_history;
-    bool m_streaming_cancelled = false;
     
     // Configuration
     bool m_verbose = true;
