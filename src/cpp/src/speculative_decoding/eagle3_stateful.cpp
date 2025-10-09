@@ -581,36 +581,38 @@ void Eagle3InferWrapper::log_model_outputs(const ov::Tensor& logits, const ov::T
     std::cout << "[EAGLE3-WRAPPER] ========== MODEL OUTPUTS =========" << std::endl;
     log_tensor_info("logits", logits);
     if (logits && logits.get_size() > 0) {
-        // For logits, show last sequence position (most relevant for next token)
+        // For logits, show top 10 values for each position
         auto logits_shape = logits.get_shape();
         if (logits_shape.size() == 3) {
             std::size_t seq_len = logits_shape[1];
             std::size_t vocab_size = logits_shape[2];
             
-            // Show top 10 logit values for last position
-            const float* logits_data = logits.data<const float>() + (seq_len - 1) * vocab_size;
-            std::vector<std::pair<float, int64_t>> top_logits;
-            
-            for (std::size_t i = 0; i < vocab_size; ++i) {  // Use all vocab_size data
-                top_logits.emplace_back(logits_data[i], static_cast<int64_t>(i));
+            // Show top 10 logit values for each position
+            for (std::size_t pos = 0; pos < seq_len; ++pos) {
+                const float* logits_data = logits.data<const float>() + pos * vocab_size;
+                std::vector<std::pair<float, int64_t>> top_logits;
+                
+                for (std::size_t i = 0; i < vocab_size; ++i) {
+                    top_logits.emplace_back(logits_data[i], static_cast<int64_t>(i));
+                }
+                
+                std::sort(top_logits.begin(), top_logits.end(), std::greater<std::pair<float, int64_t>>());
+                
+                std::cout << "[EAGLE3-WRAPPER] Position " << pos << " - Top 10 logits: ";
+                for (std::size_t i = 0; i < std::min<std::size_t>(10, top_logits.size()); ++i) {
+                    std::cout << "token_" << top_logits[i].second << ":" << std::fixed << std::setprecision(3) << top_logits[i].first;
+                    if (i + 1 < std::min<std::size_t>(10, top_logits.size())) std::cout << ", ";
+                }
+                std::cout << std::endl;
+                
+                // Show first 20 raw logit values for each position
+                std::cout << "[EAGLE3-WRAPPER] Position " << pos << " - First 20 raw logits: ";
+                for (std::size_t i = 0; i < std::min<std::size_t>(20, vocab_size); ++i) {
+                    std::cout << std::fixed << std::setprecision(4) << logits_data[i];
+                    if (i + 1 < std::min<std::size_t>(20, vocab_size)) std::cout << ", ";
+                }
+                std::cout << std::endl;
             }
-            
-            std::sort(top_logits.begin(), top_logits.end(), std::greater<std::pair<float, int64_t>>());
-            
-            std::cout << "[EAGLE3-WRAPPER] Top 10 logits for last position: ";
-            for (std::size_t i = 0; i < std::min<std::size_t>(10, top_logits.size()); ++i) {
-                std::cout << "token_" << top_logits[i].second << ":" << std::fixed << std::setprecision(3) << top_logits[i].first;
-                if (i + 1 < std::min<std::size_t>(10, top_logits.size())) std::cout << ", ";
-            }
-            std::cout << std::endl;
-            
-            // Show first 20 raw logit values for last position
-            std::cout << "[EAGLE3-WRAPPER] First 20 raw logits for last position: ";
-            for (std::size_t i = 0; i < std::min<std::size_t>(20, vocab_size); ++i) {
-                std::cout << std::fixed << std::setprecision(4) << logits_data[i];
-                if (i + 1 < std::min<std::size_t>(20, vocab_size)) std::cout << ", ";
-            }
-            std::cout << std::endl;
         }
     }
     
@@ -800,16 +802,18 @@ EncodedResults StatefulEagle3LLMPipeline::generate(const EncodedInputs& inputs,
     }
     
     // Debug override - overwrite input_ids and attention_mask
-    {
-        static const int64_t debug_tokens[] = {151644, 872, 198, 12555, 374, 279, 1102, 315, 220, 18, 17, 488, 220, 17, 353, 220, 18, 151645, 198, 151644, 77091, 198};
-        constexpr size_t token_count = sizeof(debug_tokens) / sizeof(debug_tokens[0]);
+    // {
+    //     static const int64_t debug_tokens[] = {128000, 128006, 9125, 128007, 271, 38766, 1303, 33025, 2696, 25, 6790, 220, 2366, 18, 198, 15724, 2696, 25, 220, 1627,
+    //                                                10263, 220, 2366, 19, 271, 128009, 128006, 882, 128007, 271, 12840, 374, 279, 1121, 315, 220, 17, 353, 220, 18,
+    //                                                128009, 128006, 78191, 128007, 271};
+    //     constexpr size_t token_count = sizeof(debug_tokens) / sizeof(debug_tokens[0]);
         
-        input_ids = ov::Tensor(ov::element::i64, {1, token_count});
-        std::copy(debug_tokens, debug_tokens + token_count, input_ids.data<int64_t>());
+    //     input_ids = ov::Tensor(ov::element::i64, {1, token_count});
+    //     std::copy(debug_tokens, debug_tokens + token_count, input_ids.data<int64_t>());
         
-        attention_mask = ov::Tensor(ov::element::i64, {1, token_count});
-        std::fill_n(attention_mask.data<int64_t>(), token_count, 1);
-    }
+    //     attention_mask = ov::Tensor(ov::element::i64, {1, token_count});
+    //     std::fill_n(attention_mask.data<int64_t>(), token_count, 1);
+    // }
     
     auto prompt_shape = input_ids.get_shape();
     if (prompt_shape[0] != 1) {
@@ -1095,8 +1099,8 @@ StatefulEagle3LLMPipeline::run_speculative_iteration(const ov::Tensor& hidden_wi
         m_draft_model->truncate_sequence(new_draft_len);
         
         // Trim KV cache for both models to match the truncated sequences
-        m_main_model->trim_kv_cache(tokens_to_remove);
-        m_draft_model->trim_kv_cache(tokens_to_remove);
+        // m_main_model->trim_kv_cache(tokens_to_remove);
+        m_draft_model->trim_kv_cache(tokens_to_remove-1);
         
         // If we have a future token, append it back
         if (future_token != -1) {
