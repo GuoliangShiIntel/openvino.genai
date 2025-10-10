@@ -182,7 +182,6 @@ private:
     // Core inference helper
     uint64_t execute_inference(const ov::Tensor& input_ids);
     void update_performance_metrics(uint64_t inference_time_us, std::size_t tokens_count);
-    void initialize_model_config(const std::shared_ptr<ov::Model>& model, const ov::CompiledModel& compiled_model);
     
     // Debug logging functions
     void log_debug(const std::string& message) const;
@@ -200,9 +199,8 @@ private:
     mutable ov::InferRequest m_request;
     ov::genai::utils::KVAxesPosition m_kv_axes_pos;
     
-    // Device-specific limits
+    // Device-specific limits (NPU only)
     std::size_t m_max_prompt_len = 0;
-    std::size_t m_kv_cache_capacity = 0;
     
     // Token sequences - each wrapper only maintains its own sequences
     std::vector<int64_t> m_tokens;      // Either target or draft tokens depending on wrapper type

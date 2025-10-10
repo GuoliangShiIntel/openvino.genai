@@ -72,14 +72,6 @@ ov::Tensor extract_last_hidden_state(const ov::Tensor& hidden_features) {
     return last_hidden;
 }
 
-/**
- * @brief Configure device-specific KV cache precision
- */
-void configure_kv_cache_precision(ov::AnyMap& properties, const std::string& device) {
-    // Set FP16 precision for all devices for memory efficiency
-    properties[ov::hint::kv_cache_precision.name()] = ov::element::f16;
-}
-
 } // anonymous namespace
 
 namespace ov {
@@ -97,55 +89,31 @@ Eagle3InferWrapper::Eagle3InferWrapper(const ov::genai::ModelDesc& model_desc)
     
     log_debug("Initializing Eagle3InferWrapper for device: " + m_device);
     
-    // Configure compilation properties
-    ov::AnyMap compilation_properties = m_properties;
-    configure_kv_cache_precision(compilation_properties, m_device);
-    log_debug("Device " + m_device + ": Setting KV cache precision to FP16 for memory efficiency");
+    // Get KV-cache axes positions
+    m_kv_axes_pos = ov::genai::utils::get_kv_axes_pos(model_desc.model);
     
-    // Compile model with enhanced properties
-    ov::Core core;
-    ov::CompiledModel compiled_model = core.compile_model(model_desc.model, m_device, compilation_properties);
-    m_request = compiled_model.create_infer_request();
+    // Device-specific initialization
+    if (m_device == "NPU") {
+        // Use NPU-specific compilation
+        auto [compiled_model, kv_desc] = ov::genai::utils::compile_decoder_for_npu(
+            model_desc.model, m_properties, m_kv_axes_pos);
+        m_max_prompt_len = kv_desc.max_prompt_len;
+        m_request = compiled_model.create_infer_request();
+        log_debug("NPU compilation completed - max prompt length: " + std::to_string(m_max_prompt_len));
+    } else {
+        // Compile model with enhanced properties using singleton core
+        auto compiled_model = ov::genai::utils::singleton_core().compile_model(
+            model_desc.model, m_device, m_properties);
+        m_request = compiled_model.create_infer_request();
+        log_debug("Non-NPU compilation completed for device: " + m_device);
+    }
     
     // Initialize performance metrics
     m_raw_perf_metrics.m_inference_durations = {ov::genai::MicroSeconds(0.0f)};
     m_raw_perf_metrics.tokenization_durations = {ov::genai::MicroSeconds(0.0f)};
     m_raw_perf_metrics.detokenization_durations = {ov::genai::MicroSeconds(0.0f)};
     
-    // Initialize model configuration
-    initialize_model_config(model_desc.model, compiled_model);
-    
     log_debug("Eagle3InferWrapper initialization completed");
-}
-
-void Eagle3InferWrapper::initialize_model_config(const std::shared_ptr<ov::Model>& model, const ov::CompiledModel& compiled_model) {
-    // Get KV-cache axes positions
-    m_kv_axes_pos = ov::genai::utils::get_kv_axes_pos(model);
-    
-    // Configure device-specific parameters
-    if (m_device == "NPU") {
-        auto inputs = compiled_model.inputs();
-        for (const auto& input : inputs) {
-            if (input.get_any_name() == "input_ids") {
-                m_max_prompt_len = input.get_shape()[1];
-                break;
-            }
-        }
-        log_debug("NPU max prompt length: " + std::to_string(m_max_prompt_len));
-    }
-    
-    // Initialize KV-cache capacity
-    auto inputs = compiled_model.inputs();
-    for (const auto& input : inputs) {
-        auto input_name = input.get_any_name();
-        if (input_name.find("past_key") != std::string::npos) {
-            auto shape = input.get_shape();
-            m_kv_cache_capacity = shape[m_kv_axes_pos.seq_len];
-            break;
-        }
-    }
-    
-    log_debug("KV-cache capacity: " + std::to_string(m_kv_cache_capacity));
 }
 
 void Eagle3InferWrapper::initialize_sequence(const ov::Tensor& input_ids, const ov::Tensor& position_ids) {
@@ -798,18 +766,18 @@ EncodedResults StatefulEagle3LLMPipeline::generate(const EncodedInputs& inputs,
     }
     
     // Debug override - overwrite input_ids and attention_mask
-    // {
-    //     static const int64_t debug_tokens[] = {128000, 128006, 9125, 128007, 271, 38766, 1303, 33025, 2696, 25, 6790, 220, 2366, 18, 198, 15724, 2696, 25, 220, 1627,
-    //                                                10263, 220, 2366, 19, 271, 128009, 128006, 882, 128007, 271, 12840, 374, 279, 1121, 315, 220, 17, 353, 220, 18,
-    //                                                128009, 128006, 78191, 128007, 271};
-    //     constexpr size_t token_count = sizeof(debug_tokens) / sizeof(debug_tokens[0]);
+    {
+        static const int64_t debug_tokens[] = {128000, 128006, 9125, 128007, 271, 38766, 1303, 33025, 2696, 25, 6790, 220, 2366, 18, 198, 15724, 2696, 25, 220, 1627,
+                                                   10263, 220, 2366, 19, 271, 128009, 128006, 882, 128007, 271, 12840, 374, 279, 1121, 315, 220, 17, 353, 220, 18,
+                                                   128009, 128006, 78191, 128007, 271};
+        constexpr size_t token_count = sizeof(debug_tokens) / sizeof(debug_tokens[0]);
         
-    //     input_ids = ov::Tensor(ov::element::i64, {1, token_count});
-    //     std::copy(debug_tokens, debug_tokens + token_count, input_ids.data<int64_t>());
+        input_ids = ov::Tensor(ov::element::i64, {1, token_count});
+        std::copy(debug_tokens, debug_tokens + token_count, input_ids.data<int64_t>());
         
-    //     attention_mask = ov::Tensor(ov::element::i64, {1, token_count});
-    //     std::fill_n(attention_mask.data<int64_t>(), token_count, 1);
-    // }
+        attention_mask = ov::Tensor(ov::element::i64, {1, token_count});
+        std::fill_n(attention_mask.data<int64_t>(), token_count, 1);
+    }
     
     auto prompt_shape = input_ids.get_shape();
     if (prompt_shape[0] != 1) {
