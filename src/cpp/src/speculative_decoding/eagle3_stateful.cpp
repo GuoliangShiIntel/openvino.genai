@@ -330,7 +330,7 @@ ov::Tensor Eagle3InferWrapper::infer_draft_model(const ov::Tensor& input_ids,
 
 void Eagle3InferWrapper::build_model_inputs(int64_t begin_idx, std::size_t size,
                                            ov::Tensor& input_ids, ov::Tensor& attention_mask, 
-                                           ov::Tensor& position_ids, bool reset_positions) {
+                                           ov::Tensor& position_ids, bool reset_positions, bool full_attention_mask) {
     const auto& tokens = m_tokens;
     const auto& positions = m_positions;
     
@@ -346,22 +346,30 @@ void Eagle3InferWrapper::build_model_inputs(int64_t begin_idx, std::size_t size,
         throw std::runtime_error("Invalid slice range for model inputs");
     }
     
-    // Create tensors
+    // Create tensors for input_ids and position_ids (current input)
     input_ids = ov::Tensor(ov::element::i64, {1, size});
-    attention_mask = ov::Tensor(ov::element::i64, {1, size});
     position_ids = ov::Tensor(ov::element::i64, {1, size});
-    
-    // Fill tensors
+
+    // Fill input_ids
     std::copy_n(tokens.data() + actual_begin, size, input_ids.data<int64_t>());
-    std::fill_n(attention_mask.data<int64_t>(), size, 1);
-    
+
+    // Fill position_ids
     if (reset_positions || positions.empty()) {
         std::iota(position_ids.data<int64_t>(), position_ids.data<int64_t>() + size, actual_begin);
     } else {
         std::copy_n(positions.data() + actual_begin, size, position_ids.data<int64_t>());
     }
-    
-    log_debug("Model inputs built: begin=" + std::to_string(actual_begin) + ", size=" + std::to_string(size));
+
+    // Attention mask: full sequence or just input_ids size
+    if (full_attention_mask) {
+        attention_mask = ov::Tensor(ov::element::i64, {1, tokens.size()});
+        std::fill_n(attention_mask.data<int64_t>(), tokens.size(), 1);
+        log_debug("Model inputs built: begin=" + std::to_string(actual_begin) + ", size=" + std::to_string(size) + ", attention_mask.size=" + std::to_string(tokens.size()));
+    } else {
+        attention_mask = ov::Tensor(ov::element::i64, {1, size});
+        std::fill_n(attention_mask.data<int64_t>(), size, 1);
+        log_debug("Model inputs built: begin=" + std::to_string(actual_begin) + ", size=" + std::to_string(size) + ", attention_mask.size=" + std::to_string(size));
+    }
 }
 
 ov::Tensor Eagle3InferWrapper::create_hidden_state_placeholder(const ov::Shape& shape) const {
@@ -433,16 +441,60 @@ ov::Tensor Eagle3InferWrapper::get_logits() const {
 }
 
 ov::Tensor Eagle3InferWrapper::get_hidden_features() const {
-    try {
-        return m_request.get_tensor("last_hidden_state");
-    } catch (const std::exception&) {
-        try {
-            return m_request.get_tensor("intermediate_output");
-        } catch (const std::exception&) {
-            log_debug("No hidden features tensor found");
-            return ov::Tensor{};
+    if (m_verbose) {
+        log_debug("=== get_hidden_features() called ===");
+    }
+    
+    // Strategy 1: Try concatenated hidden state (original logic)
+    if (auto tensor = try_get_tensor("last_hidden_state")) {
+        if (m_verbose) {
+            log_debug("SUCCESS: Using concatenated hidden state: last_hidden_state");
+            log_tensor_info("last_hidden_state", tensor);
+        }
+        return slice_hidden_features_to_actual_length(tensor);
+    } else {
+        if (m_verbose) {
+            log_debug("Strategy 1 FAILED: last_hidden_state not found or empty");
         }
     }
+    
+    // Strategy 2: Try intermediate output (backward compatibility)
+    if (auto tensor = try_get_tensor("intermediate_output")) {
+        if (m_verbose) {
+            log_debug("SUCCESS: Using intermediate output for backward compatibility");
+            log_tensor_info("intermediate_output", tensor);
+        }
+        return slice_hidden_features_to_actual_length(tensor);
+    } else {
+        if (m_verbose) {
+            log_debug("Strategy 2 FAILED: intermediate_output not found or empty");
+        }
+    }
+    
+    // Strategy 3: Try to collect and concatenate separate hidden states
+    if (m_verbose) {
+        log_debug("Entering Strategy 3: Trying to collect and concatenate separate hidden states");
+    }
+    
+    auto separate_tensors = collect_separate_hidden_states();
+    if (!separate_tensors.empty()) {
+        if (m_verbose) {
+            log_debug("SUCCESS: Concatenating " + std::to_string(separate_tensors.size()) + " separate hidden states");
+            for (size_t i = 0; i < separate_tensors.size(); ++i) {
+                log_debug("  Tensor[" + std::to_string(i) + "] shape: [" + 
+                         shape_to_string(separate_tensors[i].get_shape()) + "]");
+            }
+        }
+        auto concatenated = concatenate_tensors_along_last_dim(separate_tensors);
+        return slice_hidden_features_to_actual_length(concatenated);
+    } else {
+        if (m_verbose) {
+            log_debug("Strategy 3 FAILED: No separate hidden states found");
+        }
+    }
+    
+    log_debug("FINAL FAILURE: No hidden features tensor found with any strategy");
+    return ov::Tensor{};
 }
 
 uint64_t Eagle3InferWrapper::execute_inference(const ov::Tensor& input_ids) {
@@ -601,6 +653,364 @@ void Eagle3InferWrapper::log_model_outputs(const ov::Tensor& logits, const ov::T
     std::cout << "[EAGLE3-WRAPPER] =================================" << std::endl;
 }
 
+ov::Tensor Eagle3InferWrapper::concatenate_tensors_along_last_dim(const std::vector<ov::Tensor>& tensors) const {
+    if (tensors.empty()) {
+        log_debug("No tensors to concatenate");
+        return ov::Tensor{};
+    }
+    
+    if (tensors.size() == 1) {
+        return tensors[0];
+    }
+    
+    // Validate tensor compatibility
+    auto reference_shape = tensors[0].get_shape();
+    auto reference_type = tensors[0].get_element_type();
+    
+    if (reference_shape.empty()) {
+        log_debug("Reference tensor has empty shape");
+        return ov::Tensor{};
+    }
+    
+    std::size_t total_last_dim = 0;
+    for (const auto& tensor : tensors) {
+        if (!tensor || tensor.get_size() == 0) {
+            log_debug("Found empty tensor in concatenation list");
+            return ov::Tensor{};
+        }
+        
+        auto shape = tensor.get_shape();
+        auto type = tensor.get_element_type();
+        
+        if (shape.size() != reference_shape.size() || type != reference_type) {
+            log_debug("Tensor shape or type mismatch in concatenation");
+            return ov::Tensor{};
+        }
+        
+        // Check that all dimensions except the last one match
+        for (std::size_t i = 0; i < shape.size() - 1; ++i) {
+            if (shape[i] != reference_shape[i]) {
+                log_debug("Tensor dimension mismatch at index " + std::to_string(i));
+                return ov::Tensor{};
+            }
+        }
+        
+        total_last_dim += shape.back();
+    }
+    
+    // Create output tensor with concatenated last dimension
+    ov::Shape output_shape = reference_shape;
+    output_shape.back() = total_last_dim;
+    ov::Tensor output_tensor(reference_type, output_shape);
+    
+    if (reference_type != ov::element::f32) {
+        log_debug("Unsupported tensor type for concatenation: " + reference_type.to_string());
+        return ov::Tensor{};
+    }
+    
+    // Perform concatenation
+    float* output_data = output_tensor.data<float>();
+    std::size_t elements_per_slice = 1;
+    for (std::size_t i = 0; i < reference_shape.size() - 1; ++i) {
+        elements_per_slice *= reference_shape[i];
+    }
+    
+    std::size_t output_offset = 0;
+    for (const auto& tensor : tensors) {
+        const float* input_data = tensor.data<const float>();
+        auto shape = tensor.get_shape();
+        std::size_t last_dim_size = shape.back();
+        std::size_t tensor_elements = tensor.get_size();
+        
+        // Copy data slice by slice
+        for (std::size_t slice = 0; slice < elements_per_slice; ++slice) {
+            std::size_t input_slice_offset = slice * last_dim_size;
+            std::size_t output_slice_offset = slice * total_last_dim + output_offset;
+            
+            std::copy_n(input_data + input_slice_offset, last_dim_size, 
+                       output_data + output_slice_offset);
+        }
+        
+        output_offset += last_dim_size;
+    }
+    
+    if (m_verbose) {
+        log_debug("Concatenated " + std::to_string(tensors.size()) + " tensors along last dimension, "
+                  "output shape: [" + std::to_string(output_shape[0]) + 
+                  ", " + std::to_string(output_shape[1]) + 
+                  ", " + std::to_string(output_shape[2]) + "]");
+    }
+    
+    return output_tensor;
+}
+
+ov::Tensor Eagle3InferWrapper::try_get_tensor(const std::string& tensor_name) const {
+    try {
+        auto tensor = m_request.get_tensor(tensor_name);
+        if (tensor && tensor.get_size() > 0) {
+            return tensor;
+        }
+    } catch (const std::exception&) {
+        // Tensor doesn't exist or access failed
+    }
+    return ov::Tensor{};
+}
+
+std::vector<ov::Tensor> Eagle3InferWrapper::collect_separate_hidden_states() const {
+    std::vector<ov::Tensor> separate_tensors;
+    
+    // First, let's enumerate all available output tensors for debugging
+    if (m_verbose) {
+        log_debug("=== DEBUG: Enumerating all available output tensors ===");
+        try {
+            // Get all output tensor names from the inference request
+            auto outputs = m_request.get_compiled_model().outputs();
+            log_debug("Total number of model outputs: " + std::to_string(outputs.size()));
+            
+            for (size_t i = 0; i < outputs.size(); ++i) {
+                const auto& output = outputs[i];
+                std::string tensor_name = output.get_any_name();
+                auto tensor_type = output.get_element_type();
+                
+                // Handle dynamic shapes safely
+                std::string shape_str = "dynamic";
+                try {
+                    if (output.get_partial_shape().is_static()) {
+                        auto tensor_shape = output.get_shape();
+                        shape_str = shape_to_string(tensor_shape);
+                    } else {
+                        shape_str = output.get_partial_shape().to_string();
+                    }
+                } catch (const std::exception& shape_e) {
+                    shape_str = "shape_error: " + std::string(shape_e.what());
+                }
+                
+                // Try to get the actual tensor to see if it has data
+                try {
+                    auto tensor = m_request.get_tensor(tensor_name);
+                    bool has_data = tensor && tensor.get_size() > 0;
+                    
+                    // Get actual runtime shape if tensor exists
+                    std::string runtime_shape = "no_tensor";
+                    if (tensor) {
+                        try {
+                            runtime_shape = shape_to_string(tensor.get_shape());
+                        } catch (const std::exception& rt_e) {
+                            runtime_shape = "runtime_shape_error: " + std::string(rt_e.what());
+                        }
+                    }
+                    
+                    log_debug("Output[" + std::to_string(i) + "]: name='" + tensor_name + 
+                              "', static_shape=[" + shape_str + 
+                              "], runtime_shape=[" + runtime_shape +
+                              "], type=" + tensor_type.to_string() + 
+                              ", has_data=" + (has_data ? "yes" : "no"));
+                } catch (const std::exception& e) {
+                    log_debug("Output[" + std::to_string(i) + "]: name='" + tensor_name + 
+                              "', static_shape=[" + shape_str + 
+                              "], type=" + tensor_type.to_string() + 
+                              ", access_error: " + std::string(e.what()));
+                }
+            }
+        } catch (const std::exception& e) {
+            log_debug("Failed to enumerate outputs: " + std::string(e.what()));
+        }
+        log_debug("=== END DEBUG: Output enumeration ===");
+    }
+    
+    // Common patterns for intermediate hidden state tensor names
+    static const std::vector<std::string> name_patterns = {
+        "intermediate_hidden_state_",
+        "hidden_state_",
+        "layer_hidden_state_"
+    };
+    
+    // First, let's try to get all available tensor names at runtime
+    std::vector<std::string> available_tensor_names;
+    if (m_verbose) {
+        log_debug("=== Collecting available runtime tensor names ===");
+    }
+    
+    try {
+        auto outputs = m_request.get_compiled_model().outputs();
+        for (const auto& output : outputs) {
+            std::string tensor_name = output.get_any_name();
+            try {
+                auto tensor = m_request.get_tensor(tensor_name);
+                if (tensor && tensor.get_size() > 0) {
+                    available_tensor_names.push_back(tensor_name);
+                    if (m_verbose) {
+                        log_debug("Available runtime tensor: '" + tensor_name + "'");
+                    }
+                }
+            } catch (const std::exception&) {
+                // Skip tensors that can't be accessed
+            }
+        }
+    } catch (const std::exception& e) {
+        if (m_verbose) {
+            log_debug("Failed to collect runtime tensor names: " + std::string(e.what()));
+        }
+    }
+    
+    // Try each pattern with sequential indices
+    for (const auto& pattern : name_patterns) {
+        std::vector<ov::Tensor> pattern_tensors;
+        
+        if (m_verbose) {
+            log_debug("Trying pattern: '" + pattern + "'");
+        }
+        
+        // Look for consecutive indices starting from 0
+        for (int i = 0; i < 32; ++i) {  // Reasonable upper limit for transformer layers
+            std::string tensor_name = pattern + std::to_string(i);
+            
+            // Check if this tensor name exists in our available list
+            bool tensor_exists = std::find(available_tensor_names.begin(), 
+                                         available_tensor_names.end(), 
+                                         tensor_name) != available_tensor_names.end();
+            
+            if (tensor_exists) {
+                auto tensor = try_get_tensor(tensor_name);
+                if (tensor) {
+                    pattern_tensors.push_back(tensor);
+                    if (m_verbose) {
+                        log_debug("Found separate hidden state: " + tensor_name + 
+                                 " shape=[" + shape_to_string(tensor.get_shape()) + "]");
+                    }
+                } else {
+                    if (m_verbose) {
+                        log_debug("Tensor exists but failed to retrieve: " + tensor_name);
+                    }
+                    break;
+                }
+            } else {
+                if (m_verbose && i == 0) {
+                    log_debug("Pattern '" + pattern + "' - no tensor found at index 0, skipping pattern");
+                }
+                // Stop at first missing index for this pattern
+                break;
+            }
+        }
+        
+        // Use the first pattern that found any tensors
+        if (!pattern_tensors.empty()) {
+            if (m_verbose) {
+                log_debug("Using pattern '" + pattern + "' found " + std::to_string(pattern_tensors.size()) + " tensors");
+            }
+            return pattern_tensors;
+        }
+    }
+    
+    return separate_tensors;
+}
+
+std::string Eagle3InferWrapper::shape_to_string(const ov::Shape& shape) const {
+    if (shape.empty()) {
+        return "empty";
+    }
+    
+    std::string result;
+    for (size_t i = 0; i < shape.size(); ++i) {
+        if (i > 0) result += ", ";
+        result += std::to_string(shape[i]);
+    }
+    return result;
+}
+
+ov::Tensor Eagle3InferWrapper::slice_hidden_features_to_actual_length(const ov::Tensor& hidden_features) const {
+    if (!hidden_features || hidden_features.get_size() == 0) {
+        if (m_verbose) {
+            log_debug("slice_hidden_features_to_actual_length: empty input tensor");
+        }
+        return hidden_features;
+    }
+    
+    auto shape = hidden_features.get_shape();
+    if (shape.size() != 3) {
+        if (m_verbose) {
+            log_debug("slice_hidden_features_to_actual_length: unexpected tensor shape dimensions: " + std::to_string(shape.size()));
+        }
+        return hidden_features;
+    }
+    
+    std::size_t actual_seq_len = get_sequence_length();
+    std::size_t tensor_seq_len = shape[1]; // Second dimension represents token length
+    
+    if (m_verbose) {
+        log_debug("slice_hidden_features_to_actual_length: actual_seq_len=" + std::to_string(actual_seq_len) + 
+                 ", tensor_seq_len=" + std::to_string(tensor_seq_len));
+    }
+    
+    // If tensor is padded (tensor length > actual length), slice to get actual length
+    if (tensor_seq_len > actual_seq_len && actual_seq_len > 0) {
+        std::size_t batch_size = shape[0];
+        std::size_t hidden_dim = shape[2];
+        
+        // Create output tensor with actual sequence length
+        ov::Tensor sliced_tensor(hidden_features.get_element_type(), {batch_size, actual_seq_len, hidden_dim});
+        
+        if (hidden_features.get_element_type() == ov::element::f32) {
+            const float* src_data = hidden_features.data<const float>();
+            float* dst_data = sliced_tensor.data<float>();
+            
+            // Calculate the starting position (slice from the end since padding is at the beginning)
+            std::size_t start_pos = tensor_seq_len - actual_seq_len;
+            
+            // Copy data batch by batch
+            for (std::size_t b = 0; b < batch_size; ++b) {
+                const float* src_batch = src_data + b * tensor_seq_len * hidden_dim;
+                float* dst_batch = dst_data + b * actual_seq_len * hidden_dim;
+                
+                // Copy from start_pos to end of sequence
+                const float* src_start = src_batch + start_pos * hidden_dim;
+                std::copy_n(src_start, actual_seq_len * hidden_dim, dst_batch);
+            }
+            
+            if (m_verbose) {
+                log_debug("slice_hidden_features_to_actual_length: sliced tensor from shape [" + 
+                         shape_to_string(shape) + "] to [" + 
+                         shape_to_string(sliced_tensor.get_shape()) + "]");
+            }
+            
+            return sliced_tensor;
+        } else if (hidden_features.get_element_type() == ov::element::f16) {
+            // Handle FP16 case
+            const uint16_t* src_data = static_cast<const uint16_t*>(hidden_features.data());
+            uint16_t* dst_data = static_cast<uint16_t*>(sliced_tensor.data());
+            
+            std::size_t start_pos = tensor_seq_len - actual_seq_len;
+            
+            for (std::size_t b = 0; b < batch_size; ++b) {
+                const uint16_t* src_batch = src_data + b * tensor_seq_len * hidden_dim;
+                uint16_t* dst_batch = dst_data + b * actual_seq_len * hidden_dim;
+                
+                const uint16_t* src_start = src_batch + start_pos * hidden_dim;
+                std::copy_n(src_start, actual_seq_len * hidden_dim, dst_batch);
+            }
+            
+            if (m_verbose) {
+                log_debug("slice_hidden_features_to_actual_length: sliced FP16 tensor from shape [" + 
+                         shape_to_string(shape) + "] to [" + 
+                         shape_to_string(sliced_tensor.get_shape()) + "]");
+            }
+            
+            return sliced_tensor;
+        } else {
+            if (m_verbose) {
+                log_debug("slice_hidden_features_to_actual_length: unsupported tensor type: " + hidden_features.get_element_type().to_string());
+            }
+            return hidden_features;
+        }
+    }
+    
+    // When no slicing needed (tensor length equals actual length)
+    if (m_verbose) {
+        log_debug("slice_hidden_features_to_actual_length: no slicing needed, returning original tensor");
+    }
+    return hidden_features;
+}
+
 //==================================================================================================
 // StatefulEagle3LLMPipeline Implementation  
 //==================================================================================================
@@ -632,9 +1042,9 @@ StatefulEagle3LLMPipeline::StatefulEagle3LLMPipeline(const ov::genai::ModelDesc&
     m_tokenizer = main_tokenizer;
     
     // Extract hidden states for Eagle3
-    extract_hidden_state_generic(main_model, "EAGLE3", "main", "");
+    extract_hidden_state_generic(main_model, "EAGLE3", "main", "", false);
     extract_hidden_state_generic(draft_model, "EAGLE3", "draft", "");
-    // ov::serialize(main_model, "main_model_sgl.xml");
+    ov::serialize(main_model, "main_model_sgl.xml");
     // ov::serialize(draft_model, "draft_model_sgl.xml");
     log_debug("Hidden state extraction completed");
     
@@ -651,7 +1061,7 @@ StatefulEagle3LLMPipeline::StatefulEagle3LLMPipeline(const ov::genai::ModelDesc&
     
     auto main_desc = main_model_desc;
     if (main_desc.device == "NPU") {
-        main_desc.properties["NPUW_LLM_MAX_GENERATION_TOKEN_LEN"] = eagle3_constants::MAX_CANDIDATES + 1;
+        main_desc.properties["NPUW_LLM_MAX_GENERATION_TOKEN_LEN"] = eagle3_constants::DEFAULT_VALIDATION_WINDOW;
     }
     
     m_main_model = std::make_unique<Eagle3InferWrapper>(main_desc);
@@ -937,7 +1347,7 @@ StatefulEagle3LLMPipeline::run_speculative_iteration(const ov::Tensor& hidden_wi
     ov::Tensor draft_input_ids, draft_attention_mask, draft_position_ids;
     int64_t begin_idx = -static_cast<int64_t>(window_size);
     m_draft_model->build_model_inputs(begin_idx, window_size, 
-                                     draft_input_ids, draft_attention_mask, draft_position_ids, true);
+                                     draft_input_ids, draft_attention_mask, draft_position_ids, true, false);
     
     auto draft_logits = m_draft_model->infer_draft_model(draft_input_ids, draft_attention_mask, draft_position_ids,
                                                         hidden_window, ov::Tensor{});
@@ -961,7 +1371,7 @@ StatefulEagle3LLMPipeline::run_speculative_iteration(const ov::Tensor& hidden_wi
     // Step 2: Additional draft iterations  
     for (std::size_t i = 0; i < eagle3_constants::DEFAULT_DRAFT_ITERATIONS; ++i) {
         m_draft_model->build_model_inputs(-1, 1, 
-                                         draft_input_ids, draft_attention_mask, draft_position_ids, false);
+                                         draft_input_ids, draft_attention_mask, draft_position_ids, false, false);
         
         auto more_logits = m_draft_model->infer_draft_model(draft_input_ids, draft_attention_mask, draft_position_ids,
                                                            ov::Tensor{}, draft_hidden);
@@ -999,7 +1409,7 @@ StatefulEagle3LLMPipeline::run_speculative_iteration(const ov::Tensor& hidden_wi
     ov::Tensor val_input_ids, val_attention_mask, val_position_ids;
     int64_t val_begin_idx = static_cast<int64_t>(current_target_len - validation_window);
     m_main_model->build_model_inputs(val_begin_idx, validation_window,
-                                    val_input_ids, val_attention_mask, val_position_ids, false);
+                                    val_input_ids, val_attention_mask, val_position_ids, false, true);
     
     // Run validation inference
     auto val_logits = m_main_model->infer_target_model(val_input_ids, val_attention_mask, val_position_ids);

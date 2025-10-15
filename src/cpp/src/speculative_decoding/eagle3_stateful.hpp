@@ -168,7 +168,7 @@ public:
     // Tensor utilities
     void build_model_inputs(int64_t begin_idx, std::size_t size,
                            ov::Tensor& input_ids, ov::Tensor& attention_mask, ov::Tensor& position_ids, 
-                           bool reset_positions = false);
+                           bool reset_positions = false, bool full_attention_mask = false);
     ov::Tensor create_hidden_state_placeholder(const ov::Shape& shape) const;
     
     // Sampling
@@ -189,6 +189,13 @@ private:
     void log_tensor_content(const std::string& name, const ov::Tensor& tensor, std::size_t max_elements = eagle3_constants::MAX_DEBUG_ELEMENTS) const;
     void log_model_inputs(const ov::Tensor& input_ids, const ov::Tensor& attention_mask, const ov::Tensor& position_ids) const;
     void log_model_outputs(const ov::Tensor& logits, const ov::Tensor& hidden_features) const;
+    
+    // Tensor utilities
+    ov::Tensor concatenate_tensors_along_last_dim(const std::vector<ov::Tensor>& tensors) const;
+    ov::Tensor try_get_tensor(const std::string& tensor_name) const;
+    std::vector<ov::Tensor> collect_separate_hidden_states() const;
+    std::string shape_to_string(const ov::Shape& shape) const;
+    ov::Tensor slice_hidden_features_to_actual_length(const ov::Tensor& hidden_features) const;
 
 private:
     // Model and configuration

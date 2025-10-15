@@ -370,12 +370,13 @@ std::vector<SequenceGroup::Ptr> ContinuousBatchingPipeline::SpeculativeDecodingI
 void extract_hidden_state_generic(std::shared_ptr<ov::Model>& model,
                                                        const std::string& eagle_version,
                                                        const std::string& model_type,
-                                                       const std::string& custom_node_name) {
+                                                       const std::string& custom_node_name,
+                                                       bool use_separate_outputs) {
     if (eagle_version == "EAGLE2" || model_type == "draft") { // for draft model, we always only need to extract last hidden state
         std::cout << model_type << " model - last hidden state extraction" << std::endl;
         ov::pass::Manager pm;
         std::vector<int> layers = {-1}; // -1 means last hidden layer
-        pm.register_pass<EagleModelTransform>(layers, eagle_version);
+        pm.register_pass<EagleModelTransform>(layers, eagle_version, use_separate_outputs);
         pm.run_passes(model);
     } else if (eagle_version == "EAGLE3") {
         std::cout << model_type << " model - Eagle 3 hidden state extraction" << std::endl;
@@ -383,14 +384,15 @@ void extract_hidden_state_generic(std::shared_ptr<ov::Model>& model,
         /*if idx==len(self.layers)-3 or idx==len(self.layers)//2 or idx==2:
             all_hidden_states += (hidden_states,)*/
         std::vector<int> layers = {2, 16, 29}; // need to add check, only support positive values
-        pm.register_pass<EagleModelTransform>(layers, eagle_version);
+        pm.register_pass<EagleModelTransform>(layers, eagle_version, use_separate_outputs);
         pm.run_passes(model);
     } else {
         std::cerr << "Error: " << model_type << " model - Unsupported eagle version: " << eagle_version << std::endl;
     }
 }
 
-EagleModelTransform::EagleModelTransform(const std::vector<int>& layers, const std::string& eagle_version) : m_layer_ids(layers), m_eagle_version(eagle_version) {
+EagleModelTransform::EagleModelTransform(const std::vector<int>& layers, const std::string& eagle_version, bool use_separate_outputs) 
+    : m_layer_ids(layers), m_eagle_version(eagle_version), m_use_separate_outputs(use_separate_outputs) {
 }
 
 bool EagleModelTransform::run_on_model(const std::shared_ptr<ov::Model>& model) {
@@ -426,16 +428,32 @@ bool EagleModelTransform::run_on_model(const std::shared_ptr<ov::Model>& model) 
         
         if (!m_hidden_layer_outputs.empty()) {
             std::cout << "EagleModelTransform - extracted intermediate hidden state outputs " << std::endl;
-            auto concat = std::make_shared<v0::Concat>(m_hidden_layer_outputs, -1);
-            concat->set_friendly_name("eagle3_hidden_states_concat");
             
-            auto result = std::make_shared<v0::Result>(concat);
-            std::string output_name = "last_hidden_state";
-            result->output(0).set_names({output_name});
-            result->set_friendly_name(output_name);
-            model->add_results({result});
-            
-            std::cout << "EagleModelTransform - Added concated eagle3 hidden state output" << std::endl;
+            if (m_use_separate_outputs) {
+                // New logic: Create separate outputs for each hidden layer
+                std::vector<std::shared_ptr<v0::Result>> intermediate_results;
+                for (size_t i = 0; i < m_hidden_layer_outputs.size(); ++i) {
+                    auto result = std::make_shared<v0::Result>(m_hidden_layer_outputs[i]);
+                    std::string output_name = "intermediate_hidden_state_" + std::to_string(i);
+                    result->output(0).set_names({output_name});
+                    result->set_friendly_name(output_name);
+                    intermediate_results.push_back(result);
+                }
+                model->add_results(intermediate_results);
+                std::cout << "EagleModelTransform - Added " << intermediate_results.size() 
+                         << " separate intermediate hidden state outputs" << std::endl;
+            } else {
+                // Original logic: Concatenate all outputs together
+                auto concat = std::make_shared<v0::Concat>(m_hidden_layer_outputs, -1);
+                concat->set_friendly_name("eagle3_hidden_states_concat");
+                
+                auto result = std::make_shared<v0::Result>(concat);
+                std::string output_name = "intermediate_hidden_state_0";
+                result->output(0).set_names({output_name});
+                result->set_friendly_name(output_name);
+                model->add_results({result});
+                std::cout << "EagleModelTransform - Added concatenated eagle3 hidden state output" << std::endl;
+            }
             return true;
         }
     }
