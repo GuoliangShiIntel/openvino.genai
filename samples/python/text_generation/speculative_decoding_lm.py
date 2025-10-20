@@ -20,8 +20,8 @@ def main():
 
     # User can run main and draft model on different devices.
     # Please, set device for main model in `openvino_genai.LLMPipeline` constructor and in openvino_genai.draft_model` for draft.
-    main_device = 'GPU'  # GPU or NPU can be used as well
-    draft_device = 'GPU'
+    main_device = 'NPU'  # GPU or NPU can be used as well
+    draft_device = 'NPU'
 
     draft_model = openvino_genai.draft_model(args.draft_model_dir, draft_device)
 
@@ -38,7 +38,7 @@ def main():
     print("LLMPipeline created successfully with Eagle3 configuration.")
     
     config = openvino_genai.GenerationConfig()
-    config.max_new_tokens = 10
+    config.max_new_tokens = 8
     # Speculative decoding generation parameters like `num_assistant_tokens` and `assistant_confidence_threshold` are mutually excluded
     # add parameter to enable speculative decoding to generate `num_assistant_tokens` candidates by draft_model per iteration
     config.num_assistant_tokens = 3

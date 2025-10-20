@@ -79,6 +79,12 @@ void update_npu_config(ov::AnyMap& config,
                        const ov::genai::utils::KVDesc& kv_desc) {
     update_config(config, {"NPU_USE_NPUW", "YES"});
     update_config(config, {"NPUW_LLM", "YES"});
+    update_config(config, {"NPUW_DEVICES", "CPU"});
+    // update_config(config, {"NPUW_ONLINE_PIPELINE", "NONE"});
+    // update_config(config, {"NPUW_DUMP_SUBS", "YES"});
+    // update_config(config, {"NPUW_ONLINE_KEEP_BLOCKS", "10"});
+    // update_config(config, {"NPUW_FOLD", "NO"});
+    // update_config(config, {"NPUW_LLM_MAX_GENERATION_TOKEN_LEN", "5"});
 
     update_config(config, {"NPUW_LLM_BATCH_DIM", kv_pos.batch});
     update_config(config, {"NPUW_LLM_SEQ_LEN_DIM", kv_pos.seq_len});

@@ -462,6 +462,18 @@ ContinuousBatchingPipeline::ContinuousBatchingForEagleDecodingImpl::get_generate
             }
             std::cout << "]" << std::endl;
             
+            // Decode generated_ids to text using tokenizer
+            if (!generated_ids.empty()) {
+                try {
+                    std::string decoded_text = m_tokenizer.decode(generated_ids);
+                    std::cout << "[DEBUG] generated_text: \"" << decoded_text << "\"" << std::endl;
+                } catch (const std::exception& e) {
+                    std::cout << "[DEBUG] Failed to decode generated_ids: " << e.what() << std::endl;
+                }
+            } else {
+                std::cout << "[DEBUG] generated_text: (empty)" << std::endl;
+            }
+            
             // 安全地检查隐藏状态
             std::cout << "[DEBUG] EagleDecodingImpl::get_generated_requests() - Hidden state shape: [";
             try {

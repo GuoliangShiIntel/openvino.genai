@@ -1056,7 +1056,12 @@ StatefulEagle3LLMPipeline::StatefulEagle3LLMPipeline(const ov::genai::ModelDesc&
     if (draft_desc.properties.empty() && draft_desc.device == main_model_desc.device) {
         draft_desc.properties = main_model_desc.properties;
     }
-    
+    if (draft_desc.device == "NPU") {
+        draft_desc.properties["NPUW_ONLINE_PIPELINE"] = "NONE";
+        // draft_desc.properties["NPUW_DUMP_SUBS"] = "YES";
+        // draft_desc.properties["NPUW_DUMP_FULL"] = "YES";
+    }
+
     m_draft_model = std::make_unique<Eagle3InferWrapper>(draft_desc);
     
     auto main_desc = main_model_desc;
@@ -1347,7 +1352,7 @@ StatefulEagle3LLMPipeline::run_speculative_iteration(const ov::Tensor& hidden_wi
     ov::Tensor draft_input_ids, draft_attention_mask, draft_position_ids;
     int64_t begin_idx = -static_cast<int64_t>(window_size);
     m_draft_model->build_model_inputs(begin_idx, window_size, 
-                                     draft_input_ids, draft_attention_mask, draft_position_ids, true, false);
+                                     draft_input_ids, draft_attention_mask, draft_position_ids, true, true);
     
     auto draft_logits = m_draft_model->infer_draft_model(draft_input_ids, draft_attention_mask, draft_position_ids,
                                                         hidden_window, ov::Tensor{});
@@ -1371,7 +1376,7 @@ StatefulEagle3LLMPipeline::run_speculative_iteration(const ov::Tensor& hidden_wi
     // Step 2: Additional draft iterations  
     for (std::size_t i = 0; i < eagle3_constants::DEFAULT_DRAFT_ITERATIONS; ++i) {
         m_draft_model->build_model_inputs(-1, 1, 
-                                         draft_input_ids, draft_attention_mask, draft_position_ids, false, false);
+                                         draft_input_ids, draft_attention_mask, draft_position_ids, false, true);
         
         auto more_logits = m_draft_model->infer_draft_model(draft_input_ids, draft_attention_mask, draft_position_ids,
                                                            ov::Tensor{}, draft_hidden);
