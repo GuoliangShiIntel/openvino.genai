@@ -297,17 +297,17 @@ ov::Tensor Eagle3InferWrapper::infer_draft_model(const ov::Tensor& input_ids,
         }
     }
     
-    m_request.set_tensor("target_hidden_state_input", target_tensor);
-    m_request.set_tensor("internal_hidden_state_input", internal_tensor);
+    m_request.set_tensor("hidden_states", target_tensor);
+    m_request.set_tensor("internal_hidden_states", internal_tensor);
     
-    // Print target_hidden_state_input and internal_hidden_state_input values if verbose
+    // Print hidden_states and internal_hidden_states values if verbose
     if (m_verbose) {
         std::cout << "[EAGLE3-WRAPPER] Final Hidden State Tensors:" << std::endl;
-        log_tensor_info("target_hidden_state_input", target_tensor);
-        log_tensor_content("target_hidden_state_input", target_tensor, 10);  // 0 means show all
+        log_tensor_info("hidden_states", target_tensor);
+        log_tensor_content("hidden_states", target_tensor, 10);  // 0 means show all
         
-        log_tensor_info("internal_hidden_state_input", internal_tensor);
-        log_tensor_content("internal_hidden_state_input", internal_tensor, 10);  // 0 means show all
+        log_tensor_info("internal_hidden_states", internal_tensor);
+        log_tensor_content("internal_hidden_states", internal_tensor, 10);  // 0 means show all
     }
     
     if (m_device != "NPU") {
@@ -544,7 +544,7 @@ void Eagle3InferWrapper::log_tensor_content(const std::string& name, const ov::T
     auto shape = tensor.get_shape();
     std::size_t total_elements = tensor.get_size();
     
-    // For input_ids, position_ids, attention_mask, target_hidden_state_input, and internal_hidden_state_input, always show all elements, ignore max_elements
+    // For input_ids, position_ids, attention_mask, hidden_states, and internal_hidden_states, always show all elements, ignore max_elements
     bool show_all = (name == "input_ids" || name == "position_ids" || name == "attention_mask");
     std::size_t elements_to_show = show_all ? total_elements : std::min(max_elements, total_elements);
     
@@ -1044,7 +1044,7 @@ StatefulEagle3LLMPipeline::StatefulEagle3LLMPipeline(const ov::genai::ModelDesc&
     // Extract hidden states for Eagle3
     extract_hidden_state_generic(main_model, "EAGLE3", "main", "", false);
     extract_hidden_state_generic(draft_model, "EAGLE3", "draft", "");
-    ov::serialize(main_model, "main_model_sgl.xml");
+    // ov::serialize(main_model, "main_model_sgl.xml");
     // ov::serialize(draft_model, "draft_model_sgl.xml");
     log_debug("Hidden state extraction completed");
     

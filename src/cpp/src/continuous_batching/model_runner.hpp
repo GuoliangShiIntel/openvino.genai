@@ -511,16 +511,15 @@ public:
         if (hidden_state_input && hidden_state_input.get_size() > 0) {
             if (m_is_hidden_state_import_needed) {
                 try {
-                    m_request.set_tensor("target_hidden_state_input", hidden_state_input);
+                    m_request.set_tensor("hidden_states", hidden_state_input);
                     auto shape = hidden_state_input.get_shape();
                     if (!shape.empty()) shape.back() = shape.back() / 3;
                     ov::Tensor fake_tensor(hidden_state_input.get_element_type(), shape);
                     std::memset(fake_tensor.data<float>(), 0, fake_tensor.get_byte_size());
-                    m_request.set_tensor("internal_hidden_state_input", fake_tensor);
-                    // 打印 target_hidden_state_input 与 internal_hidden_state_input 仅前后20个值
+                    m_request.set_tensor("internal_hidden_states", fake_tensor);
                     try {
-                        auto tgt = m_request.get_tensor("target_hidden_state_input");
-                        auto inl = m_request.get_tensor("internal_hidden_state_input");
+                        auto tgt = m_request.get_tensor("hidden_states");
+                        auto inl = m_request.get_tensor("internal_hidden_states");
                         auto dump_head_tail = [](const char* tag, const ov::Tensor& t){
                             auto s = t.get_shape();
                             std::cout << "[DEBUG] " << tag << " shape: [";
@@ -540,23 +539,23 @@ public:
                                 }
                             }
                         };
-                        dump_head_tail("target_hidden_state_input", tgt);
-                        dump_head_tail("internal_hidden_state_input", inl);
+                        dump_head_tail("hidden_states", tgt);
+                        dump_head_tail("internal_hidden_states", inl);
                     } catch (const ov::Exception&) {}
                 } catch (const ov::Exception& e) {
                 }
             } else {
                 try {
-                    m_request.set_tensor("internal_hidden_state_input", hidden_state_input);
+                    m_request.set_tensor("internal_hidden_states", hidden_state_input);
                     auto shape = hidden_state_input.get_shape();
                     if (!shape.empty()) shape.back() = shape.back() * 3;
                     ov::Tensor fake_tensor(hidden_state_input.get_element_type(), shape);
                     std::memset(fake_tensor.data<float>(), 0, fake_tensor.get_byte_size());
-                    m_request.set_tensor("target_hidden_state_input", fake_tensor);
-                    // 打印 internal_hidden_state_input 与 target_hidden_state_input 仅前后20个值
+                    m_request.set_tensor("hidden_states", fake_tensor);
+                    // 打印 internal_hidden_states 与 hidden_states 仅前后20个值
                     try {
-                        auto inl = m_request.get_tensor("internal_hidden_state_input");
-                        auto tgt = m_request.get_tensor("target_hidden_state_input");
+                        auto inl = m_request.get_tensor("internal_hidden_states");
+                        auto tgt = m_request.get_tensor("hidden_states");
                         auto dump_head_tail = [](const char* tag, const ov::Tensor& t){
                             auto s = t.get_shape();
                             std::cout << "[DEBUG] " << tag << " shape: [";
@@ -576,8 +575,8 @@ public:
                                 }
                             }
                         };
-                        dump_head_tail("internal_hidden_state_input", inl);
-                        dump_head_tail("target_hidden_state_input", tgt);
+                        dump_head_tail("internal_hidden_states", inl);
+                        dump_head_tail("hidden_states", tgt);
                     } catch (const ov::Exception&) {}
                 } catch (const ov::Exception& e) {
                 }

@@ -448,7 +448,7 @@ bool EagleModelTransform::run_on_model(const std::shared_ptr<ov::Model>& model) 
                 concat->set_friendly_name("eagle3_hidden_states_concat");
                 
                 auto result = std::make_shared<v0::Result>(concat);
-                std::string output_name = "intermediate_hidden_state_0";
+                std::string output_name = "last_hidden_state";
                 result->output(0).set_names({output_name});
                 result->set_friendly_name(output_name);
                 model->add_results({result});
@@ -486,8 +486,8 @@ bool EagleInputTransform::apply(NodePtr node, std::vector<std::shared_ptr<v0::Pa
         }
         auto shape = node->get_output_partial_shape(0);
         auto internal_hidden_state = std::make_shared<v0::Parameter>(node->get_element_type(), node->get_output_partial_shape(0));
-        internal_hidden_state->output(0).set_names({"internal_hidden_state_input"});
-        internal_hidden_state->set_friendly_name("internal_hidden_state_input");
+        internal_hidden_state->output(0).set_names({"internal_hidden_states"});
+        internal_hidden_state->set_friendly_name("internal_hidden_states");
         // create new eltwise node to add output of MatMul node and
         auto new_eltwise = std::make_shared<v1::Add>(internal_hidden_state, matmul_node->output(0));
         ov::replace_node(matmul_node, new_eltwise);
